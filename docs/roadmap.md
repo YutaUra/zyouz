@@ -44,10 +44,10 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Given a layout tree and terminal dimensions, compute the exact rectangle (row, col, width, height) for each pane.
 
-- [ ] Recursive layout calculation: horizontal/vertical splits
-- [ ] Size modes: `percent`, `fixed`, and equal distribution (default)
-- [ ] Border allocation (1 cell between panes)
-- [ ] Recalculate on terminal resize (SIGWINCH)
+- [x] Recursive layout calculation: horizontal/vertical splits
+- [x] Size modes: `percent`, `fixed`, and equal distribution (default)
+- [x] Border allocation (1 cell between panes)
+- [x] Recalculate on terminal resize (SIGWINCH)
 
 **Exit criteria:** Given a config and terminal size, produces correct pane rectangles. Verified by unit tests with various layout configurations.
 

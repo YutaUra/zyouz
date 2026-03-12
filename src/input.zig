@@ -16,17 +16,34 @@ pub const Action = union(enum) {
 
 pub const InputHandler = struct {
     state: State = .normal,
+    prefix_key: u8 = default_prefix_key,
 
     const State = enum { normal, command, command_esc, command_csi };
 
-    const prefix_key = 0x13; // Ctrl+S
+    const default_prefix_key = 0x13; // Ctrl+S
     const quit_key = 0x11; // Ctrl+Q
+
+    pub fn initWithPrefix(prefix: u8) InputHandler {
+        return .{ .prefix_key = prefix };
+    }
+
+    /// Parse a "ctrl-<letter>" string into a control character byte.
+    /// Returns null if the input is not a valid ctrl-key string.
+    pub fn parseCtrlKey(s: []const u8) ?u8 {
+        if (s.len == 6 and std.mem.eql(u8, s[0..5], "ctrl-")) {
+            const ch = s[5];
+            if (ch >= 'a' and ch <= 'z') {
+                return ch - 'a' + 1;
+            }
+        }
+        return null;
+    }
 
     /// Process a single byte of input. Returns the action to take.
     pub fn feed(self: *InputHandler, byte: u8) Action {
         switch (self.state) {
             .normal => {
-                if (byte == prefix_key) {
+                if (byte == self.prefix_key) {
                     self.state = .command;
                     return .none;
                 }
@@ -171,4 +188,47 @@ test "command mode: unknown CSI final byte exits command mode" {
     const action = handler.feed('Z'); // unknown
     try std.testing.expectEqual(InputHandler.State.normal, handler.state);
     try std.testing.expectEqual(Action.none, action);
+}
+
+test "custom prefix key: Ctrl+B enters command mode" {
+    var handler = InputHandler.initWithPrefix(0x02); // Ctrl+B
+    const action = handler.feed(0x02);
+    try std.testing.expectEqual(Action.none, action);
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
+}
+
+test "custom prefix key: default Ctrl+S is not intercepted" {
+    var handler = InputHandler.initWithPrefix(0x02); // Ctrl+B
+    const action = handler.feed(0x13); // Ctrl+S should be forwarded
+    try std.testing.expectEqual(Action{ .forward = 0x13 }, action);
+}
+
+test "custom prefix key: double tap forwards the key" {
+    var handler = InputHandler.initWithPrefix(0x02); // Ctrl+B
+
+    const first = handler.feed(0x02);
+    try std.testing.expectEqual(Action.none, first);
+
+    // Second Ctrl+B exits command mode and forwards it
+    const second = handler.feed(0x02);
+    try std.testing.expectEqual(Action{ .forward = 0x02 }, second);
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "parseCtrlKey: parses ctrl-b to 0x02" {
+    try std.testing.expectEqual(@as(u8, 0x02), InputHandler.parseCtrlKey("ctrl-b").?);
+}
+
+test "parseCtrlKey: parses ctrl-s to 0x13" {
+    try std.testing.expectEqual(@as(u8, 0x13), InputHandler.parseCtrlKey("ctrl-s").?);
+}
+
+test "parseCtrlKey: parses ctrl-a to 0x01" {
+    try std.testing.expectEqual(@as(u8, 0x01), InputHandler.parseCtrlKey("ctrl-a").?);
+}
+
+test "parseCtrlKey: returns null for invalid input" {
+    try std.testing.expectEqual(@as(?u8, null), InputHandler.parseCtrlKey("invalid"));
+    try std.testing.expectEqual(@as(?u8, null), InputHandler.parseCtrlKey("ctrl-"));
+    try std.testing.expectEqual(@as(?u8, null), InputHandler.parseCtrlKey("ctrl-ab"));
 }

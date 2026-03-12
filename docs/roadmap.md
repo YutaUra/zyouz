@@ -57,12 +57,12 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Draw multiple panes with borders, each showing its PTY output in the correct region.
 
-- [ ] Spawn a PTY per pane
-- [ ] Per-pane virtual terminal emulator (parse ANSI sequences, maintain screen buffer)
-- [ ] Render each pane's buffer to its computed rectangle
-- [ ] Draw borders between panes
-- [ ] Highlight active pane border
-- [ ] Composite all panes and flush to terminal
+- [x] Spawn a PTY per pane
+- [x] Per-pane virtual terminal emulator (parse ANSI sequences, maintain screen buffer)
+- [x] Render each pane's buffer to its computed rectangle
+- [x] Draw borders between panes
+- [x] Highlight active pane border
+- [x] Composite all panes and flush to terminal
 
 **Exit criteria:** A 2-pane horizontal split shows two commands running side-by-side with a visible border. Active pane is visually distinct.
 
@@ -72,12 +72,12 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Full keyboard input routing with the prefix key + transient command mode.
 
-- [ ] Default: all input forwarded to focused pane's PTY
-- [ ] Prefix key (Ctrl+S) enters command mode
-- [ ] Command mode: arrow keys switch focus directionally
-- [ ] Command mode: Ctrl+Q triggers clean shutdown
-- [ ] Command mode: any other key exits mode and forwards the key
-- [ ] Command mode visual indicator (border color/style change)
+- [x] Default: all input forwarded to focused pane's PTY
+- [x] Prefix key (Ctrl+S) enters command mode
+- [x] Command mode: arrow keys switch focus directionally
+- [x] Command mode: Ctrl+Q triggers clean shutdown
+- [x] Command mode: any other key exits mode and forwards the key
+- [x] Command mode visual indicator (border color/style change)
 - [ ] Configurable prefix key (from config)
 
 **Exit criteria:** Can switch between panes using Ctrl+S → arrow keys. Ctrl+S → Ctrl+Q exits. All other keys pass through transparently.

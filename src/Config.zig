@@ -49,6 +49,7 @@ pub const Config = struct {
     // Unmanaged to avoid storing an allocator pointer that becomes
     // dangling when Config is moved (self-referential struct problem).
     layouts: std.StringArrayHashMapUnmanaged(Layout),
+    prefix_key: u8 = 0x13, // Ctrl+S default
 
     pub fn deinit(self: *Config) void {
         self.layouts.deinit(self.arena.allocator());
@@ -93,6 +94,7 @@ pub const ZonNamedLayout = struct {
 };
 
 pub const ZonConfig = struct {
+    prefix_key: ?[]const u8 = null,
     layouts: []const ZonNamedLayout,
 };
 
@@ -164,7 +166,15 @@ pub fn parseFromSlice(backing_allocator: Allocator, source: [:0]const u8) ParseE
         layouts.put(alloc, named.name, .{ .root = root }) catch return error.OutOfMemory;
     }
 
-    return .{ .arena = arena, .layouts = layouts };
+    const input_mod = @import("input.zig");
+    var prefix_key: u8 = 0x13; // default Ctrl+S
+    if (zon_config.prefix_key) |pk_str| {
+        if (input_mod.InputHandler.parseCtrlKey(pk_str)) |pk| {
+            prefix_key = pk;
+        }
+    }
+
+    return .{ .arena = arena, .layouts = layouts, .prefix_key = prefix_key };
 }
 
 /// Read and parse a ZON config file from the given path.
@@ -536,6 +546,41 @@ test "defaultConfigPath: contains .config/zyouz/config.zon" {
     const path = try defaultConfigPath(std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expect(std.mem.endsWith(u8, path, "/.config/zyouz/config.zon"));
+}
+
+test "parseFromSlice: prefix_key is parsed" {
+    const source =
+        \\.{
+        \\    .prefix_key = "ctrl-b",
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"} },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    try std.testing.expectEqual(@as(u8, 0x02), config.prefix_key);
+}
+
+test "parseFromSlice: default prefix_key is Ctrl+S when not specified" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"} },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    try std.testing.expectEqual(@as(u8, 0x13), config.prefix_key);
 }
 
 test "nested split layout structure" {

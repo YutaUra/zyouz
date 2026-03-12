@@ -113,6 +113,7 @@ pub fn main() !void {
             mutable_rects,
             layout.root,
             &active_pane,
+            config.prefix_key,
         ) catch {};
         return;
     }

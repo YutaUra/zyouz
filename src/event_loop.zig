@@ -110,6 +110,7 @@ pub fn runMultiPane(
     rects: []Layout.Rect,
     config_pane: Config.Pane,
     active_pane: *usize,
+    prefix_key: u8,
 ) !void {
     try installSignalHandler();
     defer {
@@ -117,7 +118,7 @@ pub fn runMultiPane(
         posix.close(signal_pipe[1]);
     }
 
-    var handler = input.InputHandler{};
+    var handler = input.InputHandler.initWithPrefix(prefix_key);
     var buf: [4096]u8 = undefined;
 
     // Initial render

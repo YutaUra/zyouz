@@ -1,1 +1,9 @@
 CLAUDE.local.md
+
+# Nix / direnv
+.direnv/
+result
+
+# Zig
+zig-out/
+.zig-cache/

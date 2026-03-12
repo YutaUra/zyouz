@@ -149,6 +149,12 @@ pub fn moveCursorBack(self: *Screen, n: u16) void {
     self.cursor_col -|= n;
 }
 
+pub fn resetAttributes(self: *Screen) void {
+    self.current_style = .{};
+    self.current_fg = .default;
+    self.current_bg = .default;
+}
+
 pub fn eraseInDisplay(self: *Screen, mode: EraseMode) void {
     switch (mode) {
         .to_end => {

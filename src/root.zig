@@ -7,6 +7,7 @@ pub const Terminal = @import("Terminal.zig");
 pub const Pty = @import("Pty.zig");
 pub const event_loop = @import("event_loop.zig");
 pub const Screen = @import("Screen.zig");
+pub const VtParser = @import("VtParser.zig");
 
 test {
     std.testing.refAllDecls(@This());

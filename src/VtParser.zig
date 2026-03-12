@@ -1,0 +1,455 @@
+const std = @import("std");
+const Screen = @import("Screen.zig");
+
+const VtParser = @This();
+
+const State = enum {
+    ground,
+    escape,
+    csi_entry,
+    csi_param,
+    csi_intermediate,
+    osc_string,
+};
+
+const max_params = 16;
+
+screen: *Screen,
+state: State,
+params: [max_params]u16,
+param_count: u8,
+private_mode: bool,
+
+pub fn init(screen: *Screen) VtParser {
+    return .{
+        .screen = screen,
+        .state = .ground,
+        .params = [_]u16{0} ** max_params,
+        .param_count = 0,
+        .private_mode = false,
+    };
+}
+
+pub fn feed(self: *VtParser, data: []const u8) void {
+    for (data) |byte| {
+        self.processByte(byte);
+    }
+}
+
+fn processByte(self: *VtParser, byte: u8) void {
+    switch (self.state) {
+        .ground => self.processGround(byte),
+        .escape => self.processEscape(byte),
+        .csi_entry, .csi_param => self.processCsi(byte),
+        .csi_intermediate => self.processCsiIntermediate(byte),
+        .osc_string => self.processOsc(byte),
+    }
+}
+
+fn processGround(self: *VtParser, byte: u8) void {
+    switch (byte) {
+        0x1B => self.state = .escape,
+        0x0A, 0x0B, 0x0C => self.screen.newline(), // LF, VT, FF
+        0x0D => self.screen.carriageReturn(),
+        0x08 => self.screen.backspace(),
+        0x09 => self.screen.tab(),
+        0x07 => {}, // BEL — ignore
+        0x00...0x06, 0x0E...0x1A, 0x1C...0x1F => {}, // other C0 — ignore
+        0x20...0x7E => self.screen.writeChar(@as(u21, byte)),
+        0x7F => {}, // DEL — ignore
+        0x80...0xFF => {}, // high bytes — ignore for now
+    }
+}
+
+fn processEscape(self: *VtParser, byte: u8) void {
+    switch (byte) {
+        '[' => {
+            self.state = .csi_entry;
+            self.resetParams();
+        },
+        ']' => self.state = .osc_string,
+        '7' => {
+            self.screen.saveCursor();
+            self.state = .ground;
+        },
+        '8' => {
+            self.screen.restoreCursor();
+            self.state = .ground;
+        },
+        'M' => {
+            self.reverseIndex();
+            self.state = .ground;
+        },
+        'c' => {
+            self.fullReset();
+            self.state = .ground;
+        },
+        else => self.state = .ground,
+    }
+}
+
+fn processCsi(self: *VtParser, byte: u8) void {
+    switch (byte) {
+        '0'...'9' => {
+            if (self.param_count == 0) self.param_count = 1;
+            const idx = self.param_count - 1;
+            if (idx < max_params) {
+                self.params[idx] = self.params[idx] *| 10 +| (byte - '0');
+            }
+            self.state = .csi_param;
+        },
+        ';' => {
+            if (self.param_count < max_params) {
+                self.param_count += 1;
+            }
+            self.state = .csi_param;
+        },
+        '?' => {
+            self.private_mode = true;
+            self.state = .csi_param;
+        },
+        0x20...0x2F => self.state = .csi_intermediate,
+        0x40...0x7E => {
+            self.dispatchCsi(byte);
+            self.state = .ground;
+        },
+        0x1B => {
+            // ESC interrupts CSI
+            self.state = .escape;
+            self.resetParams();
+        },
+        else => self.state = .ground,
+    }
+}
+
+fn processCsiIntermediate(self: *VtParser, byte: u8) void {
+    switch (byte) {
+        0x20...0x2F => {}, // accumulate intermediates (ignored)
+        0x40...0x7E => {
+            // Final byte — ignore intermediate sequences for now
+            self.state = .ground;
+        },
+        else => self.state = .ground,
+    }
+}
+
+fn processOsc(self: *VtParser, byte: u8) void {
+    switch (byte) {
+        0x07 => self.state = .ground, // BEL terminates OSC
+        0x1B => self.state = .escape, // ESC \ (ST) — escape state will handle
+        else => {}, // consume OSC payload
+    }
+}
+
+fn dispatchCsi(self: *VtParser, final: u8) void {
+    if (self.private_mode) {
+        self.dispatchPrivateMode(final);
+        return;
+    }
+    switch (final) {
+        'H', 'f' => { // CUP — Cursor Position
+            const row = self.getParam(0, 1);
+            const col = self.getParam(1, 1);
+            self.screen.setCursorPos(row -| 1, col -| 1);
+        },
+        'A' => self.screen.moveCursorUp(self.getParam(0, 1)), // CUU
+        'B' => self.screen.moveCursorDown(self.getParam(0, 1)), // CUD
+        'C' => self.screen.moveCursorForward(self.getParam(0, 1)), // CUF
+        'D' => self.screen.moveCursorBack(self.getParam(0, 1)), // CUB
+        'G' => { // CHA — Cursor Horizontal Absolute
+            const col = self.getParam(0, 1);
+            self.screen.cursor_col = @min(col -| 1, self.screen.width - 1);
+        },
+        'd' => { // VPA — Vertical Position Absolute
+            const row = self.getParam(0, 1);
+            self.screen.cursor_row = @min(row -| 1, self.screen.height - 1);
+        },
+        'J' => { // ED — Erase in Display
+            const mode = self.getParam(0, 0);
+            switch (mode) {
+                0 => self.screen.eraseInDisplay(.to_end),
+                1 => self.screen.eraseInDisplay(.to_start),
+                2, 3 => self.screen.eraseInDisplay(.all),
+                else => {},
+            }
+        },
+        'K' => { // EL — Erase in Line
+            const mode = self.getParam(0, 0);
+            switch (mode) {
+                0 => self.screen.eraseInLine(.to_end),
+                1 => self.screen.eraseInLine(.to_start),
+                2 => self.screen.eraseInLine(.all),
+                else => {},
+            }
+        },
+        'L' => self.screen.insertLines(self.getParam(0, 1)), // IL
+        'M' => self.screen.deleteLines(self.getParam(0, 1)), // DL
+        'm' => self.handleSgr(), // SGR
+        'r' => { // DECSTBM — Set Scrolling Region
+            const top = self.getParam(0, 1);
+            const bottom = self.getParam(1, self.screen.height);
+            self.screen.setScrollRegion(top -| 1, bottom -| 1);
+            self.screen.setCursorPos(0, 0);
+        },
+        's' => self.screen.saveCursor(),
+        'u' => self.screen.restoreCursor(),
+        'P' => { // DCH — Delete Character
+            const n = self.getParam(0, 1);
+            self.deleteChars(n);
+        },
+        '@' => { // ICH — Insert Character
+            const n = self.getParam(0, 1);
+            self.insertChars(n);
+        },
+        'X' => { // ECH — Erase Character
+            const n = self.getParam(0, 1);
+            self.eraseChars(n);
+        },
+        else => {}, // Unknown CSI — ignore
+    }
+}
+
+fn dispatchPrivateMode(self: *VtParser, final: u8) void {
+    const param = self.getParam(0, 0);
+    switch (final) {
+        'h' => { // DECSET
+            switch (param) {
+                25 => self.screen.cursor_visible = true,
+                else => {},
+            }
+        },
+        'l' => { // DECRST
+            switch (param) {
+                25 => self.screen.cursor_visible = false,
+                else => {},
+            }
+        },
+        else => {},
+    }
+}
+
+fn handleSgr(self: *VtParser) void {
+    if (self.param_count == 0) {
+        self.screen.resetAttributes();
+        return;
+    }
+    var i: u8 = 0;
+    while (i < self.param_count) {
+        const p = self.params[i];
+        switch (p) {
+            0 => self.screen.resetAttributes(),
+            1 => self.screen.current_style.bold = true,
+            2 => self.screen.current_style.dim = true,
+            3 => self.screen.current_style.italic = true,
+            4 => self.screen.current_style.underline = true,
+            5 => self.screen.current_style.blink = true,
+            7 => self.screen.current_style.inverse = true,
+            8 => self.screen.current_style.hidden = true,
+            9 => self.screen.current_style.strikethrough = true,
+            22 => {
+                self.screen.current_style.bold = false;
+                self.screen.current_style.dim = false;
+            },
+            23 => self.screen.current_style.italic = false,
+            24 => self.screen.current_style.underline = false,
+            25 => self.screen.current_style.blink = false,
+            27 => self.screen.current_style.inverse = false,
+            28 => self.screen.current_style.hidden = false,
+            29 => self.screen.current_style.strikethrough = false,
+            30...37 => self.screen.current_fg = .{ .indexed = @intCast(p - 30) },
+            38 => {
+                i += 1;
+                if (i < self.param_count) {
+                    switch (self.params[i]) {
+                        5 => { // 256-color
+                            i += 1;
+                            if (i < self.param_count) {
+                                self.screen.current_fg = .{ .indexed = @intCast(self.params[i]) };
+                            }
+                        },
+                        2 => { // RGB
+                            if (i + 3 < self.param_count) {
+                                self.screen.current_fg = .{ .rgb = .{
+                                    .r = @intCast(self.params[i + 1]),
+                                    .g = @intCast(self.params[i + 2]),
+                                    .b = @intCast(self.params[i + 3]),
+                                } };
+                                i += 3;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            },
+            39 => self.screen.current_fg = .default,
+            40...47 => self.screen.current_bg = .{ .indexed = @intCast(p - 40) },
+            48 => {
+                i += 1;
+                if (i < self.param_count) {
+                    switch (self.params[i]) {
+                        5 => { // 256-color
+                            i += 1;
+                            if (i < self.param_count) {
+                                self.screen.current_bg = .{ .indexed = @intCast(self.params[i]) };
+                            }
+                        },
+                        2 => { // RGB
+                            if (i + 3 < self.param_count) {
+                                self.screen.current_bg = .{ .rgb = .{
+                                    .r = @intCast(self.params[i + 1]),
+                                    .g = @intCast(self.params[i + 2]),
+                                    .b = @intCast(self.params[i + 3]),
+                                } };
+                                i += 3;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            },
+            49 => self.screen.current_bg = .default,
+            90...97 => self.screen.current_fg = .{ .indexed = @intCast(p - 90 + 8) },
+            100...107 => self.screen.current_bg = .{ .indexed = @intCast(p - 100 + 8) },
+            else => {},
+        }
+        i += 1;
+    }
+}
+
+fn reverseIndex(self: *VtParser) void {
+    if (self.screen.cursor_row <= self.screen.scroll_top) {
+        self.screen.scrollDown(1);
+    } else {
+        self.screen.cursor_row -= 1;
+    }
+}
+
+fn fullReset(self: *VtParser) void {
+    self.screen.cursor_row = 0;
+    self.screen.cursor_col = 0;
+    self.screen.scroll_top = 0;
+    self.screen.scroll_bottom = self.screen.height - 1;
+    self.screen.current_style = .{};
+    self.screen.current_fg = .default;
+    self.screen.current_bg = .default;
+    self.screen.cursor_visible = true;
+    self.screen.wrap_pending = false;
+    @memset(self.screen.cells, Screen.Cell{});
+}
+
+fn deleteChars(self: *VtParser, n: u16) void {
+    const row = self.screen.cursor_row;
+    const col = self.screen.cursor_col;
+    const w = self.screen.width;
+    const count = @min(n, w - col);
+    const row_start: usize = @as(usize, row) * @as(usize, w);
+
+    if (col + count < w) {
+        const src_start = row_start + col + count;
+        const src_end = row_start + w;
+        const dst_start = row_start + col;
+        std.mem.copyForwards(Screen.Cell, self.screen.cells[dst_start .. dst_start + (src_end - src_start)], self.screen.cells[src_start..src_end]);
+    }
+    const blank_start = row_start + w - count;
+    const blank_end = row_start + w;
+    @memset(self.screen.cells[blank_start..blank_end], Screen.Cell{});
+}
+
+fn insertChars(self: *VtParser, n: u16) void {
+    const row = self.screen.cursor_row;
+    const col = self.screen.cursor_col;
+    const w = self.screen.width;
+    const count = @min(n, w - col);
+    const row_start: usize = @as(usize, row) * @as(usize, w);
+
+    if (col + count < w) {
+        const src_start = row_start + col;
+        const src_end = row_start + w - count;
+        const dst_start = row_start + col + count;
+        std.mem.copyBackwards(Screen.Cell, self.screen.cells[dst_start .. dst_start + (src_end - src_start)], self.screen.cells[src_start..src_end]);
+    }
+    const blank_start = row_start + col;
+    const blank_end = row_start + col + count;
+    @memset(self.screen.cells[blank_start..blank_end], Screen.Cell{});
+}
+
+fn eraseChars(self: *VtParser, n: u16) void {
+    const row = self.screen.cursor_row;
+    const col = self.screen.cursor_col;
+    const w = self.screen.width;
+    const count = @min(n, w - col);
+    const row_start: usize = @as(usize, row) * @as(usize, w);
+    const start = row_start + col;
+    @memset(self.screen.cells[start .. start + count], Screen.Cell{});
+}
+
+fn getParam(self: *const VtParser, idx: u8, default: u16) u16 {
+    if (idx < self.param_count and self.params[idx] != 0) {
+        return self.params[idx];
+    }
+    return default;
+}
+
+fn resetParams(self: *VtParser) void {
+    self.params = [_]u16{0} ** max_params;
+    self.param_count = 0;
+    self.private_mode = false;
+}
+
+test "printable ASCII writes to screen" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("Hi");
+
+    try std.testing.expectEqual(@as(u21, 'H'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'i'), screen.cellAt(0, 1).char);
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor_col);
+}
+
+test "CR and LF control characters" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AB\r\nCD");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 1).char);
+    try std.testing.expectEqual(@as(u21, 'C'), screen.cellAt(1, 0).char);
+    try std.testing.expectEqual(@as(u21, 'D'), screen.cellAt(1, 1).char);
+}
+
+test "backspace control character" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AB\x08C");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'C'), screen.cellAt(0, 1).char);
+}
+
+test "tab control character" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("A\tB");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 8).char);
+}
+
+test "BEL is ignored without crash" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("A\x07B");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 1).char);
+}

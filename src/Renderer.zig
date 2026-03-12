@@ -11,6 +11,7 @@ const BorderDir = struct {
 };
 
 const active_color = Screen.Color{ .indexed = 2 }; // green
+const command_mode_color = Screen.Color{ .indexed = 3 }; // yellow
 const inactive_color = Screen.Color{ .indexed = 8 }; // dark gray
 
 width: u16,
@@ -44,7 +45,8 @@ pub fn deinit(self: *Renderer) void {
     self.allocator.free(self.border_colors);
 }
 
-pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: usize) void {
+pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: usize, command_mode: bool) void {
+    const active_border_color = if (command_mode) command_mode_color else active_color;
     const w: usize = self.width;
     const h: usize = self.height;
 
@@ -110,7 +112,7 @@ pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: 
                     break;
                 }
             }
-            self.border_colors[idx] = if (is_active_adjacent) active_color else inactive_color;
+            self.border_colors[idx] = if (is_active_adjacent) active_border_color else inactive_color;
         }
     }
 
@@ -377,7 +379,7 @@ test "horizontal 2-pane split produces vertical border" {
     var renderer = try Renderer.init(std.testing.allocator, 81, 24);
     defer renderer.deinit();
 
-    renderer.computeBorders(rects, 0);
+    renderer.computeBorders(rects, 0, false);
 
     try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(0, 40).char);
     try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(23, 40).char);
@@ -394,7 +396,7 @@ test "vertical 2-pane split produces horizontal border" {
     var renderer = try Renderer.init(std.testing.allocator, 80, 25);
     defer renderer.deinit();
 
-    renderer.computeBorders(rects, 0);
+    renderer.computeBorders(rects, 0, false);
 
     try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(12, 0).char);
     try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(12, 79).char);
@@ -410,7 +412,7 @@ test "active pane border has highlight color" {
     var renderer = try Renderer.init(std.testing.allocator, 81, 24);
     defer renderer.deinit();
 
-    renderer.computeBorders(rects, 0);
+    renderer.computeBorders(rects, 0, false);
     const border = renderer.borderCellAt(0, 40);
 
     try std.testing.expectEqual(Screen.Color{ .indexed = 2 }, border.fg);
@@ -429,7 +431,7 @@ test "inactive border has dim color" {
     var renderer = try Renderer.init(std.testing.allocator, 81, 24);
     defer renderer.deinit();
 
-    renderer.computeBorders(rects, 0);
+    renderer.computeBorders(rects, 0, false);
     // Horizontal border between pane 1 and pane 2 at row 11, col 50
     const border = renderer.borderCellAt(11, 50);
 
@@ -446,7 +448,7 @@ test "cross junction where borders intersect" {
     var renderer = try Renderer.init(std.testing.allocator, 81, 24);
     defer renderer.deinit();
 
-    renderer.computeBorders(rects, 0);
+    renderer.computeBorders(rects, 0, false);
 
     // Vertical border at col 40
     try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(0, 40).char);
@@ -500,6 +502,22 @@ test "render output includes SGR for colored cells" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[31m") != null);
     // Should contain SGR reset
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[0m") != null);
+}
+
+test "command mode changes active border to yellow" {
+    const rects = &[_]Layout.Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 81, 24);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, true); // command_mode = true
+    const border = renderer.borderCellAt(0, 40);
+
+    // Command mode: active border should be yellow (indexed 3)
+    try std.testing.expectEqual(Screen.Color{ .indexed = 3 }, border.fg);
 }
 
 test "full render hides cursor at start" {

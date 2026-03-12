@@ -93,7 +93,7 @@ pub fn run(terminal: *Terminal.Terminal, pty: *Pty.Pty) !void {
                         _ = try pty.writeInput(&.{b});
                     },
                     .quit => return,
-                    .none => {},
+                    .focus_up, .focus_down, .focus_left, .focus_right, .none => {},
                 }
             }
         }
@@ -121,7 +121,7 @@ pub fn runMultiPane(
     var buf: [4096]u8 = undefined;
 
     // Initial render
-    renderer.computeBorders(rects, active_pane.*);
+    renderer.computeBorders(rects, active_pane.*, handler.state == .command);
     try renderAll(terminal, renderer, panes, rects, active_pane.*);
 
     while (true) {
@@ -162,7 +162,7 @@ pub fn runMultiPane(
             // Resize renderer
             renderer.deinit();
             renderer.* = try Renderer.init(allocator, size.cols, size.rows);
-            renderer.computeBorders(rects, active_pane.*);
+            renderer.computeBorders(rects, active_pane.*, handler.state == .command);
             needs_render = true;
         }
 
@@ -207,12 +207,25 @@ pub fn runMultiPane(
             const n = terminal.readInput(&buf) catch continue;
             if (active_pane.* < panes.len) {
                 for (buf[0..n]) |byte| {
+                    const prev_state = handler.state;
                     switch (handler.feed(byte)) {
                         .forward => |b| {
                             _ = try panes[active_pane.*].pty.writeInput(&.{b});
                         },
                         .quit => return,
+                        .focus_up => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .up),
+                        .focus_down => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .down),
+                        .focus_left => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .left),
+                        .focus_right => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .right),
                         .none => {},
+                    }
+                    // Recompute borders when entering/leaving command mode
+                    // to show visual indicator.
+                    if (handler.state != prev_state and
+                        (handler.state == .command or prev_state == .command))
+                    {
+                        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+                        needs_render = true;
                     }
                 }
             }
@@ -221,6 +234,21 @@ pub fn runMultiPane(
         if (needs_render) {
             try renderAll(terminal, renderer, panes, rects, active_pane.*);
         }
+    }
+}
+
+fn handleFocus(
+    rects: []const Layout.Rect,
+    active_pane: *usize,
+    renderer: *Renderer,
+    handler: *const input.InputHandler,
+    needs_render: *bool,
+    dir: Layout.Direction,
+) void {
+    if (Layout.findNeighbor(rects, active_pane.*, dir)) |neighbor| {
+        active_pane.* = neighbor;
+        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+        needs_render.* = true;
     }
 }
 

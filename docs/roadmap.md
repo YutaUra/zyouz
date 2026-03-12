@@ -30,11 +30,11 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Parse `~/.config/zyouz/config.zon` and produce an in-memory layout tree.
 
-- [ ] Define layout tree data structures (direction, children, command, size, mouse, restart)
-- [ ] Parse ZON config file at runtime using `std.zon`
-- [ ] Named layout lookup (`zyouz <name>`, default to `default`)
-- [ ] Validation: error on missing `default` layout when no name given
-- [ ] Validation: error on invalid config (missing command in leaf, etc.)
+- [x] Define layout tree data structures (direction, children, command, size, mouse, restart)
+- [x] Parse ZON config file at runtime using `std.zon`
+- [x] Named layout lookup (`zyouz <name>`, default to `default`)
+- [x] Validation: error on missing `default` layout when no name given
+- [x] Validation: error on invalid config (missing command in leaf, etc.)
 
 **Exit criteria:** `zyouz web-app` reads config, parses the named layout, prints the parsed tree to stdout.
 

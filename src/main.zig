@@ -48,7 +48,8 @@ pub fn main() !void {
             },
         };
 
-        // Initialize terminal
+        // Initialize terminal (but don't enter alternate screen yet —
+        // errors during setup must remain visible on the normal screen).
         var terminal = zyouz.Terminal.Terminal.init() catch |err| {
             if (err == error.NotATerminal) {
                 std.debug.print("error: no controlling terminal (stdin is not a TTY)\n", .{});
@@ -60,9 +61,6 @@ pub fn main() !void {
 
         try terminal.enableRawMode();
         defer terminal.disableRawMode();
-
-        try terminal.enterAlternateScreen();
-        defer terminal.leaveAlternateScreen() catch {};
 
         const size = try terminal.getSize();
 
@@ -81,7 +79,7 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
-        // Spawn panes
+        // Spawn panes (before alternate screen so errors are visible)
         var panes_buf: [32]Pane = undefined;
         const pane_count = @min(leaves.items.len, 32);
         for (0..pane_count) |i| {
@@ -101,6 +99,10 @@ pub fn main() !void {
         @memcpy(mutable_rects_buf[0..pane_count], rects[0..pane_count]);
         const mutable_rects = mutable_rects_buf[0..pane_count];
 
+        // Now enter alternate screen — all fallible setup is done.
+        try terminal.enterAlternateScreen();
+        defer terminal.leaveAlternateScreen() catch {};
+
         // Run multi-pane event loop
         var active_pane: usize = 0;
         zyouz.event_loop.runMultiPane(
@@ -111,7 +113,9 @@ pub fn main() !void {
             mutable_rects,
             layout.root,
             &active_pane,
-        ) catch {};
+        ) catch |err| {
+            std.debug.print("event loop error: {s}\n", .{@errorName(err)});
+        };
 
         return;
     }
@@ -138,5 +142,7 @@ pub fn main() !void {
     var pty = try zyouz.Pty.Pty.spawn(&argv, size);
     defer pty.deinit();
 
-    zyouz.event_loop.run(&terminal, &pty) catch {};
+    zyouz.event_loop.run(&terminal, &pty) catch |err| {
+        std.debug.print("event loop error: {s}\n", .{@errorName(err)});
+    };
 }

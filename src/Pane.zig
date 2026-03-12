@@ -15,11 +15,23 @@ rect: Layout.Rect,
 allocator: Allocator,
 
 pub fn initFromCommand(allocator: Allocator, command: []const []const u8, rect: Layout.Rect) !Pane {
-    // Build null-terminated argv for execvp
+    // Build null-terminated argv for execvp.
+    // Strings from ZON config are not null-terminated, so we must
+    // create proper sentinel-terminated copies for execvp.
     const argv = try allocator.alloc(?[*:0]const u8, command.len + 1);
-    defer allocator.free(argv);
+    defer {
+        for (argv[0..command.len]) |ptr| {
+            // Free each dupeZ'd string: recover the slice from the sentinel ptr.
+            const s: [*:0]const u8 = ptr.?;
+            // Find the length by scanning for the sentinel.
+            var len: usize = 0;
+            while (s[len] != 0) len += 1;
+            allocator.free(s[0 .. len + 1]);
+        }
+        allocator.free(argv);
+    }
     for (command, 0..) |arg, i| {
-        argv[i] = @ptrCast(arg.ptr);
+        argv[i] = (try allocator.dupeZ(u8, arg)).ptr;
     }
     argv[command.len] = null;
     const argv_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(argv.ptr);

@@ -2,6 +2,20 @@ const std = @import("std");
 const zyouz = @import("zyouz");
 
 const Config = zyouz.Config;
+const Layout = zyouz.Layout;
+const Pane = zyouz.Pane;
+const Renderer = zyouz.Renderer;
+
+fn collectLeaves(pane: Config.Pane, out: *std.ArrayListUnmanaged(Config.Pane.Leaf)) !void {
+    switch (pane) {
+        .leaf => |leaf| try out.append(std.heap.page_allocator, leaf),
+        .split => |split| {
+            for (split.children) |child| {
+                try collectLeaves(child, out);
+            }
+        },
+    }
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,7 +27,6 @@ pub fn main() !void {
 
     const layout_name: ?[]const u8 = if (args.len > 1) args[1] else null;
 
-    // If a layout name is given (or we want to use config), parse config.
     if (layout_name != null) {
         const config_path = try Config.defaultConfigPath(allocator);
         defer allocator.free(config_path);
@@ -27,7 +40,6 @@ pub fn main() !void {
         const layout = config.resolveLayout(layout_name) catch |err| switch (err) {
             error.NoDefaultLayout => {
                 std.debug.print("error: no 'default' layout found in config\n", .{});
-                std.debug.print("hint: add a layout named 'default', or specify a layout name: zyouz <name>\n", .{});
                 std.process.exit(1);
             },
             error.LayoutNotFound => {
@@ -36,10 +48,65 @@ pub fn main() !void {
             },
         };
 
-        const stdout = std.fs.File.stdout().deprecatedWriter();
-        const name = layout_name orelse "default";
-        try stdout.print("Layout: {s}\n", .{name});
-        try Config.printTree(stdout, layout.root, 0);
+        // Initialize terminal
+        var terminal = try zyouz.Terminal.Terminal.init();
+        defer terminal.deinit();
+
+        try terminal.enableRawMode();
+        defer terminal.disableRawMode();
+
+        try terminal.enterAlternateScreen();
+        defer terminal.leaveAlternateScreen() catch {};
+
+        const size = try terminal.getSize();
+
+        // Compute layout rects
+        const area = Layout.Rect{ .col = 0, .row = 0, .width = size.cols, .height = size.rows };
+        const rects = try Layout.compute(allocator, layout.root, area);
+        defer allocator.free(rects);
+
+        // Collect leaf panes (depth-first order matches rect order)
+        var leaves: std.ArrayListUnmanaged(Config.Pane.Leaf) = .empty;
+        defer leaves.deinit(std.heap.page_allocator);
+        try collectLeaves(layout.root, &leaves);
+
+        if (leaves.items.len != rects.len) {
+            std.debug.print("error: leaf count ({d}) != rect count ({d})\n", .{ leaves.items.len, rects.len });
+            std.process.exit(1);
+        }
+
+        // Spawn panes
+        var panes_buf: [32]Pane = undefined;
+        const pane_count = @min(leaves.items.len, 32);
+        for (0..pane_count) |i| {
+            panes_buf[i] = try Pane.initFromCommand(allocator, leaves.items[i].command, rects[i]);
+        }
+        const panes = panes_buf[0..pane_count];
+        defer {
+            for (panes) |*p| p.deinit();
+        }
+
+        // Create renderer
+        var renderer = try Renderer.init(allocator, size.cols, size.rows);
+        defer renderer.deinit();
+
+        // Make a mutable copy of rects for resize
+        var mutable_rects_buf: [32]Layout.Rect = undefined;
+        @memcpy(mutable_rects_buf[0..pane_count], rects[0..pane_count]);
+        const mutable_rects = mutable_rects_buf[0..pane_count];
+
+        // Run multi-pane event loop
+        var active_pane: usize = 0;
+        zyouz.event_loop.runMultiPane(
+            allocator,
+            &terminal,
+            panes,
+            &renderer,
+            mutable_rects,
+            layout.root,
+            &active_pane,
+        ) catch {};
+
         return;
     }
 

@@ -8,6 +8,7 @@ pub const Pty = @import("Pty.zig");
 pub const event_loop = @import("event_loop.zig");
 pub const Screen = @import("Screen.zig");
 pub const VtParser = @import("VtParser.zig");
+pub const Renderer = @import("Renderer.zig");
 
 test {
     std.testing.refAllDecls(@This());

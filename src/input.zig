@@ -5,6 +5,11 @@ pub const Action = union(enum) {
     forward: u8,
     /// Clean shutdown requested (Ctrl+S → Ctrl+Q).
     quit,
+    /// Switch focus directionally.
+    focus_up,
+    focus_down,
+    focus_left,
+    focus_right,
     /// Input consumed by state machine, no action needed.
     none,
 };
@@ -12,7 +17,7 @@ pub const Action = union(enum) {
 pub const InputHandler = struct {
     state: State = .normal,
 
-    const State = enum { normal, command };
+    const State = enum { normal, command, command_esc, command_csi };
 
     const prefix_key = 0x13; // Ctrl+S
     const quit_key = 0x11; // Ctrl+Q
@@ -31,8 +36,31 @@ pub const InputHandler = struct {
                 if (byte == quit_key) {
                     return .quit;
                 }
+                if (byte == 0x1B) {
+                    self.state = .command_esc;
+                    return .none;
+                }
                 self.state = .normal;
                 return .{ .forward = byte };
+            },
+            .command_esc => {
+                if (byte == '[') {
+                    self.state = .command_csi;
+                    return .none;
+                }
+                // Not a CSI sequence — exit command mode
+                self.state = .normal;
+                return .{ .forward = byte };
+            },
+            .command_csi => {
+                self.state = .normal;
+                return switch (byte) {
+                    'A' => .focus_up,
+                    'B' => .focus_down,
+                    'C' => .focus_right,
+                    'D' => .focus_left,
+                    else => .none,
+                };
             },
         }
     }
@@ -86,4 +114,61 @@ test "full quit sequence: Ctrl+S then Ctrl+Q" {
 
     const quit = handler.feed(0x11); // Ctrl+Q
     try std.testing.expectEqual(Action.quit, quit);
+}
+
+test "command mode: arrow up switches focus up" {
+    var handler = InputHandler{ .state = .command };
+
+    // Arrow up = ESC [ A
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_up, handler.feed('A'));
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "command mode: arrow down switches focus down" {
+    var handler = InputHandler{ .state = .command };
+
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_down, handler.feed('B'));
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "command mode: arrow right switches focus right" {
+    var handler = InputHandler{ .state = .command };
+
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_right, handler.feed('C'));
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "command mode: arrow left switches focus left" {
+    var handler = InputHandler{ .state = .command };
+
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_left, handler.feed('D'));
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "command mode: incomplete escape returns to normal" {
+    var handler = InputHandler{ .state = .command };
+
+    // ESC followed by non-[ should exit command mode
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    const action = handler.feed('x');
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(Action{ .forward = 'x' }, action);
+}
+
+test "command mode: unknown CSI final byte exits command mode" {
+    var handler = InputHandler{ .state = .command };
+
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    const action = handler.feed('Z'); // unknown
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(Action.none, action);
 }

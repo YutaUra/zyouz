@@ -14,13 +14,13 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Launch a single command in a PTY, display its output fullscreen, and forward keyboard input. Essentially a transparent terminal passthrough — the simplest thing that proves the PTY pipeline works end-to-end.
 
-- [ ] Enter raw mode / alternate screen on startup, restore on exit
-- [ ] Allocate a PTY and spawn a child process (e.g. `bash`)
-- [ ] Forward PTY output to the terminal (ANSI passthrough)
-- [ ] Forward keyboard input to the PTY
-- [ ] Handle SIGWINCH (terminal resize) and propagate to PTY
-- [ ] Clean shutdown: kill child process, restore terminal state
-- [ ] Ctrl+S prefix key detection (just exit for now)
+- [x] Enter raw mode / alternate screen on startup, restore on exit
+- [x] Allocate a PTY and spawn a child process (e.g. `bash`)
+- [x] Forward PTY output to the terminal (ANSI passthrough)
+- [x] Forward keyboard input to the PTY
+- [x] Handle SIGWINCH (terminal resize) and propagate to PTY
+- [x] Clean shutdown: kill child process, restore terminal state
+- [x] Ctrl+S prefix key detection (just exit for now)
 
 **Exit criteria:** `zyouz` launches `bash` fullscreen, indistinguishable from running `bash` directly. Ctrl+S → Ctrl+Q exits cleanly.
 

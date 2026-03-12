@@ -78,7 +78,7 @@ Project scaffold, dev environment, and philosophy documentation.
 - [x] Command mode: Ctrl+Q triggers clean shutdown
 - [x] Command mode: any other key exits mode and forwards the key
 - [x] Command mode visual indicator (border color/style change)
-- [ ] Configurable prefix key (from config)
+- [x] Configurable prefix key (from config)
 
 **Exit criteria:** Can switch between panes using Ctrl+S → arrow keys. Ctrl+S → Ctrl+Q exits. All other keys pass through transparently.
 

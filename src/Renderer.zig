@@ -178,6 +178,194 @@ pub fn isBorder(self: *const Renderer, row: u16, col: u16) bool {
     return dir.horizontal or dir.vertical;
 }
 
+pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect) !void {
+    _ = self;
+    var last_fg: Screen.Color = .default;
+    var last_bg: Screen.Color = .default;
+    var last_style: Screen.Style = .{};
+
+    var row: u16 = 0;
+    while (row < screen.height) : (row += 1) {
+        // Position cursor at start of each row in the terminal
+        try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+            @as(u32, rect.row) + @as(u32, row) + 1,
+            @as(u32, rect.col) + 1,
+        });
+
+        var col: u16 = 0;
+        while (col < screen.width) : (col += 1) {
+            const cell = screen.cellAt(row, col);
+
+            // Emit SGR only when attributes change
+            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style))
+            {
+                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+            }
+
+            // Write character as UTF-8
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
+            try writer.writeAll(buf[0..len]);
+        }
+    }
+    // Reset attributes after pane
+    try writer.writeAll("\x1b[0m");
+    last_fg = .default;
+    last_bg = .default;
+    last_style = .{};
+}
+
+pub fn renderBorders(self: *const Renderer, writer: anytype) !void {
+    const w: usize = self.width;
+    const h: usize = self.height;
+
+    for (0..h) |row| {
+        var run_start: ?usize = null;
+        for (0..w) |col| {
+            const idx = row * w + col;
+            if (self.border_grid[idx].horizontal or self.border_grid[idx].vertical) {
+                if (run_start == null) {
+                    run_start = col;
+                    // Position cursor
+                    try std.fmt.format(writer, "\x1b[{d};{d}H", .{ row + 1, col + 1 });
+                    // Set color
+                    const cell = &self.border_cells[idx];
+                    try writeCellSgr(writer, cell);
+                }
+                const cell = &self.border_cells[idx];
+                // If color changed from previous border cell, emit new SGR
+                if (run_start != null and col > run_start.?) {
+                    const prev_idx = row * w + col - 1;
+                    if (!std.meta.eql(self.border_cells[prev_idx].fg, cell.fg)) {
+                        try writeCellSgr(writer, cell);
+                    }
+                }
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
+                try writer.writeAll(buf[0..len]);
+            } else {
+                run_start = null;
+            }
+        }
+    }
+    try writer.writeAll("\x1b[0m");
+}
+
+pub fn renderFrame(
+    self: *const Renderer,
+    writer: anytype,
+    screens: []const *const Screen,
+    rects: []const Layout.Rect,
+    active_pane: usize,
+) !void {
+    // Hide cursor
+    try writer.writeAll("\x1b[?25l");
+
+    // Render all panes
+    for (screens, rects) |screen, rect| {
+        try self.renderPane(writer, screen, rect);
+    }
+
+    // Render borders
+    try self.renderBorders(writer);
+
+    // Position cursor at active pane's cursor
+    if (active_pane < screens.len) {
+        const screen = screens[active_pane];
+        const rect = rects[active_pane];
+        try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+            @as(u32, rect.row) + @as(u32, screen.cursor_row) + 1,
+            @as(u32, rect.col) + @as(u32, screen.cursor_col) + 1,
+        });
+        // Show cursor if active pane has it visible
+        if (screen.cursor_visible) {
+            try writer.writeAll("\x1b[?25h");
+        }
+    }
+}
+
+fn writeSgr(
+    writer: anytype,
+    cell: *const Screen.Cell,
+    last_fg: *Screen.Color,
+    last_bg: *Screen.Color,
+    last_style: *Screen.Style,
+) !void {
+    // Reset first, then set new attributes
+    try writer.writeAll("\x1b[0m");
+    last_style.* = .{};
+    last_fg.* = .default;
+    last_bg.* = .default;
+
+    // Style attributes
+    if (cell.style.bold) try writer.writeAll("\x1b[1m");
+    if (cell.style.dim) try writer.writeAll("\x1b[2m");
+    if (cell.style.italic) try writer.writeAll("\x1b[3m");
+    if (cell.style.underline) try writer.writeAll("\x1b[4m");
+    if (cell.style.blink) try writer.writeAll("\x1b[5m");
+    if (cell.style.inverse) try writer.writeAll("\x1b[7m");
+    if (cell.style.hidden) try writer.writeAll("\x1b[8m");
+    if (cell.style.strikethrough) try writer.writeAll("\x1b[9m");
+
+    // Foreground
+    switch (cell.fg) {
+        .default => {},
+        .indexed => |idx| {
+            if (idx < 8) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) + 30});
+            } else if (idx < 16) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) - 8 + 90});
+            } else {
+                try std.fmt.format(writer, "\x1b[38;5;{d}m", .{idx});
+            }
+        },
+        .rgb => |c| {
+            try std.fmt.format(writer, "\x1b[38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
+        },
+    }
+
+    // Background
+    switch (cell.bg) {
+        .default => {},
+        .indexed => |idx| {
+            if (idx < 8) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) + 40});
+            } else if (idx < 16) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) - 8 + 100});
+            } else {
+                try std.fmt.format(writer, "\x1b[48;5;{d}m", .{idx});
+            }
+        },
+        .rgb => |c| {
+            try std.fmt.format(writer, "\x1b[48;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
+        },
+    }
+
+    last_fg.* = cell.fg;
+    last_bg.* = cell.bg;
+    last_style.* = cell.style;
+}
+
+fn writeCellSgr(writer: anytype, cell: *const Screen.Cell) !void {
+    try writer.writeAll("\x1b[0m");
+    switch (cell.fg) {
+        .default => {},
+        .indexed => |idx| {
+            if (idx < 8) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) + 30});
+            } else if (idx < 16) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) - 8 + 90});
+            } else {
+                try std.fmt.format(writer, "\x1b[38;5;{d}m", .{idx});
+            }
+        },
+        .rgb => |c| {
+            try std.fmt.format(writer, "\x1b[38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
+        },
+    }
+}
+
 // --- Tests ---
 
 test "horizontal 2-pane split produces vertical border" {
@@ -266,4 +454,67 @@ test "cross junction where borders intersect" {
     try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(11, 42).char);
     // Junction at (11, 40)
     try std.testing.expectEqual(@as(u21, '├'), renderer.borderCellAt(11, 40).char);
+}
+
+// --- Compositing tests ---
+
+test "render produces cursor-positioned output for pane content" {
+    var screen = try Screen.init(std.testing.allocator, 3, 2);
+    defer screen.deinit();
+    var parser = @import("VtParser.zig").init(&screen);
+    parser.feed("Hi!");
+
+    const rect = Layout.Rect{ .col = 5, .row = 3, .width = 3, .height = 2 };
+    var renderer = try Renderer.init(std.testing.allocator, 20, 10);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    const output = buf.items;
+
+    // Should contain cursor positioning to row 4 (1-based), col 6
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[4;6H") != null);
+    // Should contain the characters
+    try std.testing.expect(std.mem.indexOf(u8, output, "Hi!") != null);
+}
+
+test "render output includes SGR for colored cells" {
+    var screen = try Screen.init(std.testing.allocator, 5, 1);
+    defer screen.deinit();
+    var parser = @import("VtParser.zig").init(&screen);
+    parser.feed("\x1b[31mR\x1b[0mN");
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 5, .height = 1 };
+    var renderer = try Renderer.init(std.testing.allocator, 5, 1);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    const output = buf.items;
+
+    // Should contain SGR for red foreground
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[31m") != null);
+    // Should contain SGR reset
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[0m") != null);
+}
+
+test "full render hides cursor at start" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    var renderer = try Renderer.init(std.testing.allocator, 10, 5);
+    defer renderer.deinit();
+
+    const screens = &[_]*const Screen{};
+    const rects = &[_]Layout.Rect{};
+
+    try renderer.renderFrame(buf.writer(std.testing.allocator), screens, rects, 0);
+    const output = buf.items;
+
+    // Starts with hide cursor
+    try std.testing.expect(std.mem.startsWith(u8, output, "\x1b[?25l"));
 }

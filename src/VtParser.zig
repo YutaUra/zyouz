@@ -631,3 +631,111 @@ test "unknown CSI final byte is consumed without crash" {
 
     try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
 }
+
+// --- SGR tests ---
+
+test "SGR 0 resets all attributes" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[1m");
+    parser.feed("\x1b[0m");
+
+    try std.testing.expectEqual(@as(u8, 0), @as(u8, @bitCast(screen.current_style)));
+    try std.testing.expectEqual(Screen.Color.default, screen.current_fg);
+    try std.testing.expectEqual(Screen.Color.default, screen.current_bg);
+}
+
+test "SGR 1 sets bold" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[1m");
+    try std.testing.expect(screen.current_style.bold);
+}
+
+test "SGR 31 sets foreground to red" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[31m");
+    try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, screen.current_fg);
+}
+
+test "SGR 42 sets background to green" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[42m");
+    try std.testing.expectEqual(Screen.Color{ .indexed = 2 }, screen.current_bg);
+}
+
+test "SGR 91 sets bright red foreground" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[91m");
+    try std.testing.expectEqual(Screen.Color{ .indexed = 9 }, screen.current_fg);
+}
+
+test "SGR 38;5;200 sets 256-color foreground" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[38;5;200m");
+    try std.testing.expectEqual(Screen.Color{ .indexed = 200 }, screen.current_fg);
+}
+
+test "SGR 38;2;255;128;0 sets RGB foreground" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[38;2;255;128;0m");
+    try std.testing.expectEqual(Screen.Color{ .rgb = .{ .r = 255, .g = 128, .b = 0 } }, screen.current_fg);
+}
+
+test "SGR 39 resets foreground to default" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[31m");
+    parser.feed("\x1b[39m");
+
+    try std.testing.expectEqual(Screen.Color.default, screen.current_fg);
+}
+
+test "multiple SGR params in one sequence" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[1;31;42m");
+
+    try std.testing.expect(screen.current_style.bold);
+    try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, screen.current_fg);
+    try std.testing.expectEqual(Screen.Color{ .indexed = 2 }, screen.current_bg);
+}
+
+test "SGR applies to subsequently written chars" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[1;31mA\x1b[0mB");
+
+    const cell_a = screen.cellAt(0, 0);
+    try std.testing.expect(cell_a.style.bold);
+    try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, cell_a.fg);
+
+    const cell_b = screen.cellAt(0, 1);
+    try std.testing.expect(!cell_b.style.bold);
+    try std.testing.expectEqual(Screen.Color.default, cell_b.fg);
+}

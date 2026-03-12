@@ -11,10 +11,20 @@ pub const Terminal = struct {
     original_termios: posix.termios,
 
     pub fn init() !Terminal {
-        // dup(STDIN) instead of open("/dev/tty") because macOS's /dev/tty
-        // special device returns POLLNVAL from poll(), making event loops
-        // impossible. The dup'd fd refers to the same terminal and is pollable.
-        const fd = try posix.dup(posix.STDIN_FILENO);
+        const fd = blk: {
+            // Prefer dup(STDIN) when stdin is a TTY — the dup'd fd is
+            // pollable on macOS, unlike /dev/tty which can return POLLNVAL.
+            if (posix.isatty(posix.STDIN_FILENO)) {
+                break :blk try posix.dup(posix.STDIN_FILENO);
+            }
+            // Fallback: open /dev/tty directly (e.g. when invoked via
+            // `zig build run` where stdin is an IPC pipe).
+            break :blk posix.open(
+                "/dev/tty",
+                .{ .ACCMODE = .RDWR, .NOCTTY = true },
+                0,
+            ) catch return error.NotATerminal;
+        };
         const original_termios = try posix.tcgetattr(fd);
         return .{
             .fd = fd,

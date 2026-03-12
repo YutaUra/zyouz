@@ -49,7 +49,13 @@ pub fn main() !void {
         };
 
         // Initialize terminal
-        var terminal = try zyouz.Terminal.Terminal.init();
+        var terminal = zyouz.Terminal.Terminal.init() catch |err| {
+            if (err == error.NotATerminal) {
+                std.debug.print("error: no controlling terminal (stdin is not a TTY)\n", .{});
+                std.debug.print("hint: run the binary directly: ./zig-out/bin/zyouz\n", .{});
+            }
+            return err;
+        };
         defer terminal.deinit();
 
         try terminal.enableRawMode();
@@ -111,7 +117,13 @@ pub fn main() !void {
     }
 
     // Default: launch single pane terminal (Milestone 1 behavior).
-    var terminal = try zyouz.Terminal.Terminal.init();
+    var terminal = zyouz.Terminal.Terminal.init() catch |err| {
+        if (err == error.NotATerminal) {
+            std.debug.print("error: no controlling terminal (stdin is not a TTY)\n", .{});
+            std.debug.print("hint: run the binary directly: ./zig-out/bin/zyouz\n", .{});
+        }
+        return err;
+    };
     defer terminal.deinit();
 
     try terminal.enableRawMode();

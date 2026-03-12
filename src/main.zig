@@ -1,10 +1,21 @@
 const std = @import("std");
+const zyouz = @import("zyouz");
 
 pub fn main() !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    var terminal = try zyouz.Terminal.Terminal.init();
+    defer terminal.deinit();
 
-    try stdout.print("zyouz v0.0.0\n", .{});
-    try stdout.flush();
+    try terminal.enableRawMode();
+    defer terminal.disableRawMode();
+
+    try terminal.enterAlternateScreen();
+    defer terminal.leaveAlternateScreen() catch {};
+
+    const size = try terminal.getSize();
+
+    const argv = [_:null]?[*:0]const u8{ "/bin/bash" };
+    var pty = try zyouz.Pty.Pty.spawn(&argv, size);
+    defer pty.deinit();
+
+    zyouz.event_loop.run(&terminal, &pty) catch {};
 }

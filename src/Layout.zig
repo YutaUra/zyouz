@@ -88,6 +88,65 @@ fn computeSplit(allocator: Allocator, split: Config.Pane.Split, area: Rect) Allo
     return result.toOwnedSlice();
 }
 
+pub const Direction = enum { up, down, left, right };
+
+/// Find the neighboring pane in the given direction.
+/// Returns the index of the closest pane that is strictly in that direction
+/// and overlaps on the perpendicular axis, or null if none exists.
+pub fn findNeighbor(rects: []const Rect, current: usize, dir: Direction) ?usize {
+    const cur = rects[current];
+    const cur_center_row: i32 = @as(i32, cur.row) + @divTrunc(@as(i32, cur.height), 2);
+    const cur_center_col: i32 = @as(i32, cur.col) + @divTrunc(@as(i32, cur.width), 2);
+
+    var best: ?usize = null;
+    var best_dist: i32 = std.math.maxInt(i32);
+
+    for (rects, 0..) |r, i| {
+        if (i == current) continue;
+
+        const r_center_row: i32 = @as(i32, r.row) + @divTrunc(@as(i32, r.height), 2);
+        const r_center_col: i32 = @as(i32, r.col) + @divTrunc(@as(i32, r.width), 2);
+
+        // Check the candidate is strictly in the requested direction
+        // and overlaps on the perpendicular axis.
+        const valid = switch (dir) {
+            .right => @as(i32, r.col) >= @as(i32, cur.col) + @as(i32, cur.width) and
+                overlapsVertically(cur, r),
+            .left => @as(i32, cur.col) >= @as(i32, r.col) + @as(i32, r.width) and
+                overlapsVertically(cur, r),
+            .down => @as(i32, r.row) >= @as(i32, cur.row) + @as(i32, cur.height) and
+                overlapsHorizontally(cur, r),
+            .up => @as(i32, cur.row) >= @as(i32, r.row) + @as(i32, r.height) and
+                overlapsHorizontally(cur, r),
+        };
+        if (!valid) continue;
+
+        // Distance: primary axis gap + perpendicular center offset
+        const dist: i32 = switch (dir) {
+            .right, .left => @as(i32, @intCast(@abs(r_center_col - cur_center_col))) +
+                @as(i32, @intCast(@abs(r_center_row - cur_center_row))),
+            .up, .down => @as(i32, @intCast(@abs(r_center_row - cur_center_row))) +
+                @as(i32, @intCast(@abs(r_center_col - cur_center_col))),
+        };
+
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = i;
+        }
+    }
+    return best;
+}
+
+fn overlapsVertically(a: Rect, b: Rect) bool {
+    return @as(i32, a.row) < @as(i32, b.row) + @as(i32, b.height) and
+        @as(i32, b.row) < @as(i32, a.row) + @as(i32, a.height);
+}
+
+fn overlapsHorizontally(a: Rect, b: Rect) bool {
+    return @as(i32, a.col) < @as(i32, b.col) + @as(i32, b.width) and
+        @as(i32, b.col) < @as(i32, a.col) + @as(i32, a.width);
+}
+
 // --- Tests ---
 
 test "single leaf pane fills entire area" {
@@ -284,6 +343,62 @@ test "non-zero origin area offset" {
     try std.testing.expectEqual(@as(usize, 2), rects.len);
     try std.testing.expectEqual(Rect{ .col = 10, .row = 5, .width = 40, .height = 24 }, rects[0]);
     try std.testing.expectEqual(Rect{ .col = 51, .row = 5, .width = 40, .height = 24 }, rects[1]);
+}
+
+// --- findNeighbor tests ---
+
+test "findNeighbor right in horizontal 2-pane" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), findNeighbor(rects, 0, .right));
+}
+
+test "findNeighbor left in horizontal 2-pane" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, 0), findNeighbor(rects, 1, .left));
+}
+
+test "findNeighbor returns null when no neighbor" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, null), findNeighbor(rects, 0, .left));
+    try std.testing.expectEqual(@as(?usize, null), findNeighbor(rects, 1, .right));
+    try std.testing.expectEqual(@as(?usize, null), findNeighbor(rects, 0, .up));
+    try std.testing.expectEqual(@as(?usize, null), findNeighbor(rects, 0, .down));
+}
+
+test "findNeighbor down in vertical 2-pane" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 80, .height = 11 },
+        .{ .col = 0, .row = 12, .width = 80, .height = 12 },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), findNeighbor(rects, 0, .down));
+    try std.testing.expectEqual(@as(?usize, 0), findNeighbor(rects, 1, .up));
+}
+
+test "findNeighbor in 3-pane L-shape layout" {
+    // left | top-right / bottom-right
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 11 },
+        .{ .col = 41, .row = 12, .width = 40, .height = 12 },
+    };
+    // From left pane, right → pane 2 is closer (center row 18 vs pane 1 center row 5,
+    // pane 0 center is at row 12)
+    try std.testing.expectEqual(@as(?usize, 2), findNeighbor(rects, 0, .right));
+    // From top-right, left → pane 0
+    try std.testing.expectEqual(@as(?usize, 0), findNeighbor(rects, 1, .left));
+    // From top-right, down → pane 2
+    try std.testing.expectEqual(@as(?usize, 2), findNeighbor(rects, 1, .down));
+    // From bottom-right, up → pane 1
+    try std.testing.expectEqual(@as(?usize, 1), findNeighbor(rects, 2, .up));
 }
 
 test "mixed percent, fixed, and equal sizing" {

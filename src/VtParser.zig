@@ -453,3 +453,181 @@ test "BEL is ignored without crash" {
     try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
     try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 1).char);
 }
+
+// --- CSI tests ---
+
+test "CSI H (CUP) moves cursor to home" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("ABC");
+    parser.feed("\x1b[H");
+
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_col);
+}
+
+test "CSI row;col H moves cursor to position (1-based)" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[5;10H");
+
+    try std.testing.expectEqual(@as(u16, 4), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 9), screen.cursor_col);
+}
+
+test "CSI A moves cursor up" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    screen.setCursorPos(5, 10);
+    parser.feed("\x1b[3A");
+
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor_row);
+}
+
+test "CSI B moves cursor down" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[3B");
+    try std.testing.expectEqual(@as(u16, 3), screen.cursor_row);
+}
+
+test "CSI C moves cursor forward" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[5C");
+    try std.testing.expectEqual(@as(u16, 5), screen.cursor_col);
+}
+
+test "CSI D moves cursor backward" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    screen.setCursorPos(0, 10);
+    parser.feed("\x1b[3D");
+    try std.testing.expectEqual(@as(u16, 7), screen.cursor_col);
+}
+
+test "CSI J erases display below cursor" {
+    var screen = try Screen.init(std.testing.allocator, 5, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("ABCDEFGHIJKLMNO");
+    screen.setCursorPos(1, 2);
+    parser.feed("\x1b[J");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'G'), screen.cellAt(1, 1).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(1, 2).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(2, 0).char);
+}
+
+test "CSI 2J erases entire display" {
+    var screen = try Screen.init(std.testing.allocator, 5, 2);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("ABCDEFGHIJ");
+    parser.feed("\x1b[2J");
+
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(1, 4).char);
+}
+
+test "CSI K erases to end of line" {
+    var screen = try Screen.init(std.testing.allocator, 5, 2);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("ABCDE");
+    screen.setCursorPos(0, 2);
+    parser.feed("\x1b[K");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 1).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 2).char);
+}
+
+test "CSI with default param (no number means 1)" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    screen.setCursorPos(5, 0);
+    parser.feed("\x1b[A");
+
+    try std.testing.expectEqual(@as(u16, 4), screen.cursor_row);
+}
+
+test "CSI L inserts lines" {
+    var screen = try Screen.init(std.testing.allocator, 3, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AAABBBCCC");
+    screen.setCursorPos(1, 0);
+    parser.feed("\x1b[1L");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(1, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(2, 0).char);
+}
+
+test "CSI M deletes lines" {
+    var screen = try Screen.init(std.testing.allocator, 3, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AAABBBCCC");
+    screen.setCursorPos(1, 0);
+    parser.feed("\x1b[1M");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'C'), screen.cellAt(1, 0).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(2, 0).char);
+}
+
+test "CSI r sets scroll region" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[5;20r");
+
+    try std.testing.expectEqual(@as(u16, 4), screen.scroll_top);
+    try std.testing.expectEqual(@as(u16, 19), screen.scroll_bottom);
+}
+
+test "incomplete CSI buffered across feed calls" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b");
+    parser.feed("[5;10H");
+
+    try std.testing.expectEqual(@as(u16, 4), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 9), screen.cursor_col);
+}
+
+test "unknown CSI final byte is consumed without crash" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[99z");
+    parser.feed("A");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+}

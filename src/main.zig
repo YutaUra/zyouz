@@ -83,7 +83,7 @@ pub fn main() !void {
         var panes_buf: [32]Pane = undefined;
         const pane_count = @min(leaves.items.len, 32);
         for (0..pane_count) |i| {
-            panes_buf[i] = try Pane.initFromCommand(allocator, leaves.items[i].command, rects[i]);
+            try panes_buf[i].initFromCommand(allocator, leaves.items[i].command, rects[i]);
         }
         const panes = panes_buf[0..pane_count];
         defer {
@@ -113,10 +113,7 @@ pub fn main() !void {
             mutable_rects,
             layout.root,
             &active_pane,
-        ) catch |err| {
-            std.debug.print("event loop error: {s}\n", .{@errorName(err)});
-        };
-
+        ) catch {};
         return;
     }
 

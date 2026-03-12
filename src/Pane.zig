@@ -14,7 +14,11 @@ parser: VtParser,
 rect: Layout.Rect,
 allocator: Allocator,
 
-pub fn initFromCommand(allocator: Allocator, command: []const []const u8, rect: Layout.Rect) !Pane {
+/// Initialize a Pane in place at `self`.
+/// Uses in-place init to avoid a dangling pointer: VtParser stores a
+/// *Screen, so returning Pane by value would copy the screen but leave
+/// the parser pointing at the old (stale) stack address.
+pub fn initFromCommand(self: *Pane, allocator: Allocator, command: []const []const u8, rect: Layout.Rect) !void {
     // Build null-terminated argv for execvp.
     // Strings from ZON config are not null-terminated, so we must
     // create proper sentinel-terminated copies for execvp.
@@ -39,16 +43,16 @@ pub fn initFromCommand(allocator: Allocator, command: []const []const u8, rect: 
     const size = Terminal.Size{ .cols = rect.width, .rows = rect.height };
     const pty = try Pty.Pty.spawn(argv_ptr, size);
 
-    var screen = try Screen.init(allocator, rect.width, rect.height);
-    const parser = VtParser.init(&screen);
-
-    return .{
+    self.* = .{
         .pty = pty,
-        .screen = screen,
-        .parser = parser,
+        .screen = try Screen.init(allocator, rect.width, rect.height),
+        .parser = undefined,
         .rect = rect,
         .allocator = allocator,
     };
+    // parser.screen must point to self.screen (the final location),
+    // not a temporary local variable.
+    self.parser = VtParser.init(&self.screen);
 }
 
 pub fn deinit(self: *Pane) void {

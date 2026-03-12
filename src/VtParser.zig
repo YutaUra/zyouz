@@ -739,3 +739,74 @@ test "SGR applies to subsequently written chars" {
     try std.testing.expect(!cell_b.style.bold);
     try std.testing.expectEqual(Screen.Color.default, cell_b.fg);
 }
+
+// --- ESC / OSC tests ---
+
+test "ESC 7 saves cursor and ESC 8 restores" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    screen.setCursorPos(5, 10);
+    parser.feed("\x1b7");
+    screen.setCursorPos(0, 0);
+    parser.feed("\x1b8");
+
+    try std.testing.expectEqual(@as(u16, 5), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 10), screen.cursor_col);
+}
+
+test "ESC M reverse index scrolls down" {
+    var screen = try Screen.init(std.testing.allocator, 3, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AAABBBCCC");
+    screen.setCursorPos(0, 0);
+    parser.feed("\x1bM");
+
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(1, 0).char);
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(2, 0).char);
+}
+
+test "CSI ?25l hides cursor" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b[?25l");
+    try std.testing.expect(!screen.cursor_visible);
+}
+
+test "CSI ?25h shows cursor" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    screen.cursor_visible = false;
+    parser.feed("\x1b[?25h");
+    try std.testing.expect(screen.cursor_visible);
+}
+
+test "OSC string consumed and ignored" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b]0;my title\x07");
+    parser.feed("A");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+}
+
+test "OSC terminated by ST (ESC backslash)" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b]0;title\x1b\\");
+    parser.feed("B");
+
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 0).char);
+}

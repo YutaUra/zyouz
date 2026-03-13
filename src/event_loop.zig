@@ -555,18 +555,20 @@ fn handleFocus(
     }
 }
 
-const shutdown_timeout_ns = 2 * std.time.ns_per_s;
+const shutdown_timeout_ns = 500 * std.time.ns_per_ms;
 
 fn gracefulShutdown(panes: []Pane) void {
-    // Phase 1: Send SIGTERM to all alive panes
+    // Phase 1: Send SIGHUP + SIGTERM to all alive panes.
+    // Interactive shells respond to SIGHUP faster than SIGTERM.
     for (panes) |*pane| {
         if (pane.isAlive()) {
+            pane.pty.sendSignal(posix.SIG.HUP) catch {};
             pane.pty.sendSignal(posix.SIG.TERM) catch {};
         }
     }
 
-    // Phase 2: Poll for exit with timeout (2 seconds)
-    const poll_interval: u64 = 50 * std.time.ns_per_ms;
+    // Phase 2: Poll for exit with timeout
+    const poll_interval: u64 = 5 * std.time.ns_per_ms;
     var elapsed: u64 = 0;
     while (elapsed < shutdown_timeout_ns) {
         var all_exited = true;
@@ -591,7 +593,8 @@ fn gracefulShutdown(panes: []Pane) void {
         }
     }
 
-    // Wait for them to actually die
+    // Brief wait for SIGKILL to take effect, then reap.
+    std.Thread.sleep(1 * std.time.ns_per_ms);
     for (panes) |*pane| {
         if (pane.isAlive()) {
             if (pane.pty.checkExited()) |code| {

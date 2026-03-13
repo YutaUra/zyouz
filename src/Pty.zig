@@ -124,10 +124,13 @@ pub const Pty = struct {
 
     pub fn deinit(self: *Pty) void {
         self.kill();
-        // If checkExited already reaped the child, skip waitpid to
-        // avoid blocking on an already-reaped PID.
         if (self.cached_exit_code == null) {
-            _ = posix.waitpid(self.child_pid, 0);
+            // Try non-blocking reap first; fall back to SIGKILL if needed.
+            _ = self.checkExited();
+            if (self.cached_exit_code == null) {
+                self.sendSignal(posix.SIG.KILL) catch {};
+                _ = posix.waitpid(self.child_pid, 0);
+            }
         }
         posix.close(self.master_fd);
     }

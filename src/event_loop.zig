@@ -112,6 +112,7 @@ pub fn runMultiPane(
     config_pane: Config.Pane,
     active_pane: *usize,
     prefix_key: u8,
+    pane_gap: u16,
 ) !void {
     try installSignalHandler();
     defer {
@@ -160,8 +161,8 @@ pub fn runMultiPane(
             const size = try terminal.getSize();
 
             // Recompute layout
-            const area = Layout.Rect{ .col = 0, .row = 0, .width = size.cols, .height = size.rows };
-            const new_rects = try Layout.compute(allocator, config_pane, area);
+            const area = Layout.Rect{ .col = 1, .row = 1, .width = size.cols -| 2, .height = size.rows -| 2 };
+            const new_rects = try Layout.compute(allocator, config_pane, area, pane_gap);
             defer allocator.free(new_rects);
 
             // Resize panes and update rects
@@ -230,7 +231,7 @@ pub fn runMultiPane(
                         },
                         .consumed => {},
                         .event => |ev| {
-                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render);
+                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render, pane_gap);
                         },
                         .escape_passthrough => |b| {
                             processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
@@ -321,6 +322,47 @@ const DragState = struct {
 
 const min_pane_size: u16 = 2;
 
+/// Check for a resizable border at the exact position or on the pane edge.
+/// When the click lands inside a pane near its edge, uses findNeighbor to
+/// locate the adjacent pane. This avoids the junction problem where
+/// borderAt fails at the intersection of vertical and horizontal dividers
+/// (e.g., in a layout with a left pane and a vertically-split right pane,
+/// borderAt cannot find panes across the junction row).
+fn findBorderNear(rects: []const Layout.Rect, row: u16, col: u16) ?Layout.BorderInfo {
+    // Direct hit on a border cell — works for most positions except junctions.
+    if (Layout.borderAt(rects, row, col)) |b| return b;
+
+    // Click is inside a pane — check if we're on the pane edge.
+    const pane_idx = Layout.paneAt(rects, row, col) orelse return null;
+    const r = rects[pane_idx];
+
+    // Right edge of pane (last content column)
+    if (col + 1 >= r.col + r.width) {
+        if (Layout.findNeighbor(rects, pane_idx, .right)) |neighbor| {
+            return .{ .pane_before = pane_idx, .pane_after = neighbor, .is_vertical = true };
+        }
+    }
+    // Left edge of pane (first content column)
+    if (col == r.col) {
+        if (Layout.findNeighbor(rects, pane_idx, .left)) |neighbor| {
+            return .{ .pane_before = neighbor, .pane_after = pane_idx, .is_vertical = true };
+        }
+    }
+    // Bottom edge of pane (last content row)
+    if (row + 1 >= r.row + r.height) {
+        if (Layout.findNeighbor(rects, pane_idx, .down)) |neighbor| {
+            return .{ .pane_before = pane_idx, .pane_after = neighbor, .is_vertical = false };
+        }
+    }
+    // Top edge of pane (first content row)
+    if (row == r.row) {
+        if (Layout.findNeighbor(rects, pane_idx, .up)) |neighbor| {
+            return .{ .pane_before = neighbor, .pane_after = pane_idx, .is_vertical = false };
+        }
+    }
+    return null;
+}
+
 fn handleMouseEvent(
     ev: MouseParser.MouseEvent,
     panes: []Pane,
@@ -330,6 +372,7 @@ fn handleMouseEvent(
     handler: *const input.InputHandler,
     drag_state: *?DragState,
     needs_render: *bool,
+    pane_gap: u16,
 ) void {
     switch (ev.kind) {
         .press => {
@@ -357,8 +400,8 @@ fn handleMouseEvent(
                 return;
             }
             if (ev.button == .left) {
-                // Check if clicking on a border to start drag
-                if (Layout.borderAt(rects, ev.row, ev.col)) |border| {
+                // Check if clicking on or near a border to start drag
+                if (findBorderNear(rects, ev.row, ev.col)) |border| {
                     drag_state.* = .{
                         .border = border,
                         .last_col = ev.col,
@@ -386,7 +429,7 @@ fn handleMouseEvent(
         .drag => {
             if (ev.button == .left) {
                 if (drag_state.*) |*ds| {
-                    applyDrag(ds, ev, panes, rects, renderer, active_pane, handler, needs_render);
+                    applyDrag(ds, ev, panes, rects, renderer, active_pane, handler, needs_render, pane_gap);
                 } else {
                     // Drag on a passthrough pane → forward
                     if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
@@ -426,19 +469,25 @@ fn applyDrag(
     active_pane: *const usize,
     handler: *const input.InputHandler,
     needs_render: *bool,
+    pane_gap: u16,
 ) void {
+    // Must match Layout.computeSplit divider_width formula.
+    const divider_width: u16 = 1 + pane_gap;
+
     if (ds.border.is_vertical) {
         const delta: i32 = @as(i32, ev.col) - @as(i32, ds.last_col);
         if (delta == 0) return;
 
         // Current border column: right edge of the "before" reference pane.
         const border_col: u16 = rects[ds.border.pane_before].col + rects[ds.border.pane_before].width;
+        // Pane after the divider starts at border_col + divider_width.
+        const after_col: u16 = border_col + divider_width;
 
         // Check all panes sharing this border can accommodate the resize.
         for (rects) |r| {
             if (r.col + r.width == border_col) {
                 if (@as(i32, r.width) + delta < min_pane_size) return;
-            } else if (r.col == border_col + 1) {
+            } else if (r.col == after_col) {
                 if (@as(i32, r.width) - delta < min_pane_size) return;
             }
         }
@@ -448,7 +497,7 @@ fn applyDrag(
             if (r.col + r.width == border_col) {
                 r.width = @intCast(@as(i32, r.width) + delta);
                 panes[i].resize(r.*) catch {};
-            } else if (r.col == border_col + 1) {
+            } else if (r.col == after_col) {
                 r.col = @intCast(@as(i32, r.col) + delta);
                 r.width = @intCast(@as(i32, r.width) - delta);
                 panes[i].resize(r.*) catch {};
@@ -460,11 +509,13 @@ fn applyDrag(
 
         // Current border row: bottom edge of the "before" reference pane.
         const border_row: u16 = rects[ds.border.pane_before].row + rects[ds.border.pane_before].height;
+        // Pane after the divider starts at border_row + divider_width.
+        const after_row: u16 = border_row + divider_width;
 
         for (rects) |r| {
             if (r.row + r.height == border_row) {
                 if (@as(i32, r.height) + delta < min_pane_size) return;
-            } else if (r.row == border_row + 1) {
+            } else if (r.row == after_row) {
                 if (@as(i32, r.height) - delta < min_pane_size) return;
             }
         }
@@ -473,7 +524,7 @@ fn applyDrag(
             if (r.row + r.height == border_row) {
                 r.height = @intCast(@as(i32, r.height) + delta);
                 panes[i].resize(r.*) catch {};
-            } else if (r.row == border_row + 1) {
+            } else if (r.row == after_row) {
                 r.row = @intCast(@as(i32, r.row) + delta);
                 r.height = @intCast(@as(i32, r.height) - delta);
                 panes[i].resize(r.*) catch {};
@@ -567,9 +618,19 @@ fn buildPaneStates(panes: []const Pane) [max_panes]Pane.ProcessState {
     return states;
 }
 
+fn buildPaneNames(panes: []const Pane) [max_panes][]const u8 {
+    var names: [max_panes][]const u8 = undefined;
+    for (panes, 0..) |*pane, i| {
+        names[i] = pane.name;
+    }
+    return names;
+}
+
 fn recomputeBorders(renderer: *Renderer, panes: []const Pane, rects: []const Layout.Rect, active_pane: usize, command_mode: bool) void {
     const states = buildPaneStates(panes);
     renderer.computeBordersWithState(rects, active_pane, command_mode, states[0..panes.len]);
+    const names = buildPaneNames(panes);
+    renderer.renderPaneNames(rects, names[0..panes.len]);
 }
 
 fn renderAll(

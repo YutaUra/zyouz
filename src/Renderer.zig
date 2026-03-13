@@ -22,6 +22,7 @@ height: u16,
 border_grid: []BorderDir,
 border_cells: []Screen.Cell,
 border_colors: []Screen.Color,
+pane_adjacency: []u32,
 allocator: Allocator,
 
 pub fn init(allocator: Allocator, width: u16, height: u16) !Renderer {
@@ -32,12 +33,15 @@ pub fn init(allocator: Allocator, width: u16, height: u16) !Renderer {
     @memset(border_cells, Screen.Cell{});
     const border_colors = try allocator.alloc(Screen.Color, size);
     @memset(border_colors, Screen.Color.default);
+    const pane_adjacency = try allocator.alloc(u32, size);
+    @memset(pane_adjacency, 0);
     return .{
         .width = width,
         .height = height,
         .border_grid = border_grid,
         .border_cells = border_cells,
         .border_colors = border_colors,
+        .pane_adjacency = pane_adjacency,
         .allocator = allocator,
     };
 }
@@ -46,6 +50,7 @@ pub fn deinit(self: *Renderer) void {
     self.allocator.free(self.border_grid);
     self.allocator.free(self.border_cells);
     self.allocator.free(self.border_colors);
+    self.allocator.free(self.pane_adjacency);
 }
 
 pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: usize, command_mode: bool) void {
@@ -61,71 +66,86 @@ pub fn computeBordersWithState(self: *Renderer, rects: []const Layout.Rect, acti
     @memset(self.border_grid, BorderDir{});
     @memset(self.border_cells, Screen.Cell{});
     @memset(self.border_colors, Screen.Color.default);
+    @memset(self.pane_adjacency, 0);
 
-    // Pass 1: Mark gap cells with direction based on immediate pane neighbors
-    for (0..h) |row| {
-        for (0..w) |col| {
-            if (cellCoveredByAny(rects, row, col)) continue;
+    // Per-pane border frame marking: each pane's border is drawn independently.
+    // This prevents borders from connecting across gaps between panes.
+    for (rects, 0..) |r, pi| {
+        const mask: u32 = @as(u32, 1) << @intCast(pi);
+        const r_right: usize = @as(usize, r.col) + @as(usize, r.width);
+        const r_bottom: usize = @as(usize, r.row) + @as(usize, r.height);
+        const col_start: usize = if (r.col > 0) @as(usize, r.col) - 1 else 0;
+        const col_end: usize = @min(r_right, w - 1); // inclusive
+        const row_start: usize = if (r.row > 0) @as(usize, r.row) - 1 else 0;
+        const row_end: usize = @min(r_bottom, h - 1); // inclusive
 
-            const idx = row * w + col;
-            const has_pane_left = col > 0 and cellCoveredByAny(rects, row, col - 1);
-            const has_pane_right = col + 1 < w and cellCoveredByAny(rects, row, col + 1);
-            const has_pane_up = row > 0 and cellCoveredByAny(rects, row - 1, col);
-            const has_pane_down = row + 1 < h and cellCoveredByAny(rects, row + 1, col);
+        // Top border
+        if (r.row > 0) {
+            const top: usize = @as(usize, r.row) - 1;
+            for (col_start..col_end + 1) |c| {
+                if (!cellCoveredByAny(rects, top, c)) {
+                    const idx = top * w + c;
+                    self.border_grid[idx].horizontal = true;
+                    self.pane_adjacency[idx] |= mask;
+                }
+            }
+        }
 
-            if (has_pane_left or has_pane_right) self.border_grid[idx].vertical = true;
-            if (has_pane_up or has_pane_down) self.border_grid[idx].horizontal = true;
+        // Bottom border
+        if (r_bottom < h) {
+            for (col_start..col_end + 1) |c| {
+                if (!cellCoveredByAny(rects, r_bottom, c)) {
+                    const idx = r_bottom * w + c;
+                    self.border_grid[idx].horizontal = true;
+                    self.pane_adjacency[idx] |= mask;
+                }
+            }
+        }
+
+        // Left border
+        if (r.col > 0) {
+            const left: usize = @as(usize, r.col) - 1;
+            for (row_start..row_end + 1) |rv| {
+                if (!cellCoveredByAny(rects, rv, left)) {
+                    const idx = rv * w + left;
+                    self.border_grid[idx].vertical = true;
+                    self.pane_adjacency[idx] |= mask;
+                }
+            }
+        }
+
+        // Right border
+        if (r_right < w) {
+            for (row_start..row_end + 1) |rv| {
+                if (!cellCoveredByAny(rects, rv, r_right)) {
+                    const idx = rv * w + r_right;
+                    self.border_grid[idx].vertical = true;
+                    self.pane_adjacency[idx] |= mask;
+                }
+            }
         }
     }
 
-    // Pass 2: Propagate directions through gap cells that neighbor other borders
-    // (handles junction cells like T-pieces and crosses)
-    for (0..h) |row| {
-        for (0..w) |col| {
-            const idx = row * w + col;
-            if (cellCoveredByAny(rects, row, col)) continue;
-
-            // Inherit vertical from above/below border neighbors
-            if (!self.border_grid[idx].vertical) {
-                const has_v_up = row > 0 and self.border_grid[(row - 1) * w + col].vertical;
-                const has_v_down = row + 1 < h and self.border_grid[(row + 1) * w + col].vertical;
-                if (has_v_up or has_v_down) self.border_grid[idx].vertical = true;
-            }
-            // Inherit horizontal from left/right border neighbors
-            if (!self.border_grid[idx].horizontal) {
-                const has_h_left = col > 0 and self.border_grid[row * w + (col - 1)].horizontal;
-                const has_h_right = col + 1 < w and self.border_grid[row * w + (col + 1)].horizontal;
-                if (has_h_left or has_h_right) self.border_grid[idx].horizontal = true;
-            }
-        }
-    }
-
-    // Pass 3: Color assignment — active pane adjacent borders get highlight,
-    // exited panes with non-zero exit code get red borders.
+    // Color assignment — use pane_adjacency to determine colors.
     for (0..h) |row| {
         for (0..w) |col| {
             const idx = row * w + col;
             if (!self.border_grid[idx].horizontal and !self.border_grid[idx].vertical) continue;
 
+            const adj_mask = self.pane_adjacency[idx];
             var is_active_adjacent = false;
             var has_error_adjacent = false;
-            for (rects, 0..) |r, pi| {
-                const r_right: usize = @as(usize, r.col) + @as(usize, r.width);
-                const r_bottom: usize = @as(usize, r.row) + @as(usize, r.height);
-                const adjacent = (col == r_right and row >= r.row and row < r_bottom) or
-                    (col + 1 == r.col and row >= r.row and row < r_bottom) or
-                    (row == r_bottom and col >= r.col and col < r_right) or
-                    (row + 1 == r.row and col >= r.col and col < r_right);
-                if (adjacent) {
-                    if (pi == active_pane) is_active_adjacent = true;
-                    if (pane_states) |states| {
-                        if (pi < states.len) {
-                            switch (states[pi]) {
-                                .exited => |code| if (code != 0) {
-                                    has_error_adjacent = true;
-                                },
-                                .running => {},
-                            }
+
+            for (0..rects.len) |pi| {
+                if (adj_mask & (@as(u32, 1) << @intCast(pi)) == 0) continue;
+                if (pi == active_pane) is_active_adjacent = true;
+                if (pane_states) |states| {
+                    if (pi < states.len) {
+                        switch (states[pi]) {
+                            .exited => |code| if (code != 0) {
+                                has_error_adjacent = true;
+                            },
+                            .running => {},
                         }
                     }
                 }
@@ -163,23 +183,39 @@ fn resolveChars(self: *Renderer) void {
             const dir = self.border_grid[idx];
             if (!dir.horizontal and !dir.vertical) continue;
 
-            const has_up = row > 0 and self.border_grid[(row - 1) * w + col].vertical;
-            const has_down = row + 1 < h and self.border_grid[(row + 1) * w + col].vertical;
-            const has_left = col > 0 and self.border_grid[row * w + (col - 1)].horizontal;
-            const has_right = col + 1 < w and self.border_grid[row * w + (col + 1)].horizontal;
+            const my_panes = self.pane_adjacency[idx];
+
+            // A neighbor connects only if it is a border AND shares at
+            // least one pane with this cell. This prevents borders of
+            // different panes from merging when they are adjacent
+            // (e.g. pane_gap = 1 → divider_width = 2).
+            const has_up = row > 0 and self.border_grid[(row - 1) * w + col].vertical and
+                (self.pane_adjacency[(row - 1) * w + col] & my_panes) != 0;
+            const has_down = row + 1 < h and self.border_grid[(row + 1) * w + col].vertical and
+                (self.pane_adjacency[(row + 1) * w + col] & my_panes) != 0;
+            const has_left = col > 0 and self.border_grid[row * w + (col - 1)].horizontal and
+                (self.pane_adjacency[row * w + (col - 1)] & my_panes) != 0;
+            const has_right = col + 1 < w and self.border_grid[row * w + (col + 1)].horizontal and
+                (self.pane_adjacency[row * w + (col + 1)] & my_panes) != 0;
 
             const char: u21 = if (dir.horizontal and dir.vertical) blk: {
-                // Junction
-                const u = has_up or (row > 0 and self.border_grid[(row - 1) * w + col].vertical);
-                const d = has_down or (row + 1 < h and self.border_grid[(row + 1) * w + col].vertical);
-                const l = has_left or (col > 0 and self.border_grid[row * w + (col - 1)].horizontal);
-                const r = has_right or (col + 1 < w and self.border_grid[row * w + (col + 1)].horizontal);
+                // Junction — use the same pane-aware neighbor checks.
+                const u = has_up;
+                const d = has_down;
+                const l = has_left;
+                const r = has_right;
 
                 if (u and d and l and r) break :blk '┼'
                 else if (u and d and r and !l) break :blk '├'
                 else if (u and d and l and !r) break :blk '┤'
                 else if (d and l and r and !u) break :blk '┬'
                 else if (u and l and r and !d) break :blk '┴'
+                else if (d and r and !u and !l) break :blk '┌'
+                else if (d and l and !u and !r) break :blk '┐'
+                else if (u and r and !d and !l) break :blk '└'
+                else if (u and l and !d and !r) break :blk '┘'
+                else if (u and d and !l and !r) break :blk '│'
+                else if (l and r and !u and !d) break :blk '─'
                 else break :blk '┼';
             } else if (dir.vertical) '│'
             else '─';
@@ -363,6 +399,64 @@ pub fn renderBorders(self: *const Renderer, writer: anytype) !void {
     try writer.writeAll("\x1b[0m");
 }
 
+pub fn renderPaneNames(self: *Renderer, rects: []const Layout.Rect, names: []const []const u8) void {
+    const w: usize = self.width;
+
+    for (rects, 0..) |r, i| {
+        if (i >= names.len) break;
+        const name = names[i];
+        if (name.len == 0) continue;
+
+        // Name goes on the top border row, just after the top-left corner.
+        // Format: " name " (padded with spaces)
+        const top_row: usize = if (r.row > 0) r.row - 1 else 0;
+        const start_col: usize = r.col; // col after the corner character
+
+        // Total width needed: space + name + space
+        const label_len = name.len + 2;
+        // Available border width (excluding corners)
+        const border_width: usize = @as(usize, r.width);
+        if (label_len > border_width) continue;
+
+        // Write " name " starting at start_col
+        var col = start_col;
+        const idx = top_row * w + col;
+        if (idx < self.border_cells.len) {
+            const color = self.border_colors[idx];
+            // Space before name
+            self.border_cells[idx] = .{
+                .char = ' ',
+                .fg = color,
+                .bg = .default,
+                .style = .{},
+            };
+            col += 1;
+            // Name characters
+            for (name) |c| {
+                const cidx = top_row * w + col;
+                if (cidx >= self.border_cells.len) break;
+                self.border_cells[cidx] = .{
+                    .char = @as(u21, c),
+                    .fg = color,
+                    .bg = .default,
+                    .style = .{},
+                };
+                col += 1;
+            }
+            // Space after name
+            const eidx = top_row * w + col;
+            if (eidx < self.border_cells.len) {
+                self.border_cells[eidx] = .{
+                    .char = ' ',
+                    .fg = self.border_colors[eidx],
+                    .bg = .default,
+                    .style = .{},
+                };
+            }
+        }
+    }
+}
+
 pub fn renderExitStatuses(self: *const Renderer, writer: anytype, rects: []const Layout.Rect, pane_states: []const Pane.ProcessState) !void {
     _ = self;
     for (rects, 0..) |rect, pi| {
@@ -401,8 +495,8 @@ pub fn renderFrame(
     rects: []const Layout.Rect,
     active_pane: usize,
 ) !void {
-    // Hide cursor
-    try writer.writeAll("\x1b[?25l");
+    // Hide cursor and clear screen to avoid stale characters on resize
+    try writer.writeAll("\x1b[?25l\x1b[2J");
 
     // Render all panes
     for (screens, rects) |screen, rect| {
@@ -435,7 +529,7 @@ pub fn renderFrameWithScrollback(
     scroll_offsets: []const usize,
     active_pane: usize,
 ) !void {
-    try writer.writeAll("\x1b[?25l");
+    try writer.writeAll("\x1b[?25l\x1b[2J");
 
     for (screens, rects, scroll_offsets) |screen, rect, offset| {
         try self.renderPaneWithOffset(writer, screen, rect, offset);
@@ -826,6 +920,122 @@ test "exited pane with exit code 0 gets green border" {
     try std.testing.expectEqual(Screen.Color{ .indexed = 2 }, border.fg);
 }
 
+test "outer frame corners for single pane inside border" {
+    // Single pane at (1,1) with width=8, height=3 inside a 10x5 renderer.
+    // Outer border cells should form a rectangular frame.
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 8, .height = 3 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 10, 5);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    // Corners
+    try std.testing.expectEqual(@as(u21, '┌'), renderer.borderCellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, '┐'), renderer.borderCellAt(0, 9).char);
+    try std.testing.expectEqual(@as(u21, '└'), renderer.borderCellAt(4, 0).char);
+    try std.testing.expectEqual(@as(u21, '┘'), renderer.borderCellAt(4, 9).char);
+    // Top/bottom edges
+    try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(0, 5).char);
+    try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(4, 5).char);
+    // Left/right edges
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 0).char);
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 9).char);
+}
+
+test "outer frame with 2-pane horizontal split has T-junctions" {
+    // 2 panes side by side inside outer border: 12w x 5h renderer
+    // pane0: (1,1, 4, 3), pane1: (6,1, 5, 3), divider at col 5
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 4, .height = 3 },
+        .{ .col = 6, .row = 1, .width = 5, .height = 3 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 12, 5);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    // Top junction at (0, 5) where divider meets top border
+    try std.testing.expectEqual(@as(u21, '┬'), renderer.borderCellAt(0, 5).char);
+    // Bottom junction at (4, 5) where divider meets bottom border
+    try std.testing.expectEqual(@as(u21, '┴'), renderer.borderCellAt(4, 5).char);
+    // Divider between panes
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 5).char);
+    // Corners still correct
+    try std.testing.expectEqual(@as(u21, '┌'), renderer.borderCellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, '┐'), renderer.borderCellAt(0, 11).char);
+    try std.testing.expectEqual(@as(u21, '└'), renderer.borderCellAt(4, 0).char);
+    try std.testing.expectEqual(@as(u21, '┘'), renderer.borderCellAt(4, 11).char);
+}
+
+test "outer border color matches adjacent active pane" {
+    // Single pane at (1,1) with width=8, height=3 inside 10x5.
+    // Active pane = 0. Outer border cells should be active color (green).
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 8, .height = 3 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 10, 5);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    // Top-left corner should have active color
+    try std.testing.expectEqual(active_color, renderer.borderCellAt(0, 0).fg);
+    // Top edge
+    try std.testing.expectEqual(active_color, renderer.borderCellAt(0, 5).fg);
+    // Left edge
+    try std.testing.expectEqual(active_color, renderer.borderCellAt(2, 0).fg);
+}
+
+test "renderPaneNames writes name on top border" {
+    // Pane at (1,1, 10, 5) inside 12x7 renderer. Name = "editor"
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 10, .height = 5 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 12, 7);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    const names: []const []const u8 = &.{"editor"};
+    renderer.renderPaneNames(rects, names);
+
+    // " editor " should appear starting at col 1 of row 0 (after ┌)
+    // Check that the cells contain the name characters
+    try std.testing.expectEqual(@as(u21, ' '), renderer.borderCellAt(0, 1).char);
+    try std.testing.expectEqual(@as(u21, 'e'), renderer.borderCellAt(0, 2).char);
+    try std.testing.expectEqual(@as(u21, 'd'), renderer.borderCellAt(0, 3).char);
+    try std.testing.expectEqual(@as(u21, 'i'), renderer.borderCellAt(0, 4).char);
+    try std.testing.expectEqual(@as(u21, 't'), renderer.borderCellAt(0, 5).char);
+    try std.testing.expectEqual(@as(u21, 'o'), renderer.borderCellAt(0, 6).char);
+    try std.testing.expectEqual(@as(u21, 'r'), renderer.borderCellAt(0, 7).char);
+    try std.testing.expectEqual(@as(u21, ' '), renderer.borderCellAt(0, 8).char);
+    // Corner should be preserved
+    try std.testing.expectEqual(@as(u21, '┌'), renderer.borderCellAt(0, 0).char);
+}
+
+test "renderPaneNames skips empty names" {
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 10, .height = 5 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 12, 7);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    const names: []const []const u8 = &.{""};
+    renderer.renderPaneNames(rects, names);
+
+    // Top edge should remain '─' (unchanged)
+    try std.testing.expectEqual(@as(u21, '─'), renderer.borderCellAt(0, 5).char);
+}
+
 test "exited pane with non-zero exit code gets red border" {
     const rects = &[_]Layout.Rect{
         .{ .col = 0, .row = 0, .width = 40, .height = 24 },
@@ -840,4 +1050,50 @@ test "exited pane with non-zero exit code gets red border" {
     // Border at col 40 adjacent to pane 1 (exited non-zero): should be red
     const border = renderer.borderCellAt(0, 40);
     try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, border.fg);
+}
+
+test "gap=1 horizontal 2-pane produces separate rectangles" {
+    // With gap=1, divider_width = 2: adjacent separate borders (no gap cell)
+    // pane0: (1,1,4,3), pane1: (7,1,5,3), renderer: 13x5
+    // divider zone: cols 5 (pane0 right border), 6 (pane1 left border)
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 4, .height = 3 },
+        .{ .col = 7, .row = 1, .width = 5, .height = 3 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 13, 5);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    // pane0's top-right corner at (0,5) should be ┐ (not ┬)
+    try std.testing.expectEqual(@as(u21, '┐'), renderer.borderCellAt(0, 5).char);
+    // pane1's top-left corner at (0,6) should be ┌ (not ┬)
+    try std.testing.expectEqual(@as(u21, '┌'), renderer.borderCellAt(0, 6).char);
+    // pane0's bottom-right corner at (4,5) should be ┘
+    try std.testing.expectEqual(@as(u21, '┘'), renderer.borderCellAt(4, 5).char);
+    // pane1's bottom-left corner at (4,6) should be └
+    try std.testing.expectEqual(@as(u21, '└'), renderer.borderCellAt(4, 6).char);
+    // pane0's right edge at (2,5) should be │
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 5).char);
+    // pane1's left edge at (2,6) should be │
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 6).char);
+}
+
+test "gap=0 still produces shared borders with T-junctions" {
+    // Regression: gap=0 should work the same as before
+    const rects = &[_]Layout.Rect{
+        .{ .col = 1, .row = 1, .width = 4, .height = 3 },
+        .{ .col = 6, .row = 1, .width = 5, .height = 3 },
+    };
+
+    var renderer = try Renderer.init(std.testing.allocator, 12, 5);
+    defer renderer.deinit();
+
+    renderer.computeBorders(rects, 0, false);
+
+    // Shared border at col 5
+    try std.testing.expectEqual(@as(u21, '┬'), renderer.borderCellAt(0, 5).char);
+    try std.testing.expectEqual(@as(u21, '┴'), renderer.borderCellAt(4, 5).char);
+    try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 5).char);
 }

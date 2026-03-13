@@ -31,6 +31,7 @@ pub const Pane = union(enum) {
         mouse: Mouse = .capture,
         restart: Restart = .never,
         size: SizeMode = .equal,
+        name: []const u8 = "",
     };
 
     pub const Split = struct {
@@ -50,6 +51,7 @@ pub const Config = struct {
     // dangling when Config is moved (self-referential struct problem).
     layouts: std.StringArrayHashMapUnmanaged(Layout),
     prefix_key: u8 = 0x13, // Ctrl+S default
+    pane_gap: u16 = 1,
 
     pub fn deinit(self: *Config) void {
         self.layouts.deinit(self.arena.allocator());
@@ -79,6 +81,7 @@ pub const ZonPane = struct {
     command: ?[]const []const u8 = null,
     mouse: Mouse = .capture,
     restart: Restart = .never,
+    name: []const u8 = "",
 
     // Split fields (present when this pane contains children)
     direction: ?Direction = null,
@@ -95,6 +98,7 @@ pub const ZonNamedLayout = struct {
 
 pub const ZonConfig = struct {
     prefix_key: ?[]const u8 = null,
+    pane_gap: ?u16 = null,
     layouts: []const ZonNamedLayout,
 };
 
@@ -127,6 +131,7 @@ pub fn convertPane(allocator: Allocator, zp: ZonPane) ParseError!Pane {
             .mouse = zp.mouse,
             .restart = zp.restart,
             .size = zp.size,
+            .name = zp.name,
         } };
     }
 
@@ -174,7 +179,7 @@ pub fn parseFromSlice(backing_allocator: Allocator, source: [:0]const u8) ParseE
         }
     }
 
-    return .{ .arena = arena, .layouts = layouts, .prefix_key = prefix_key };
+    return .{ .arena = arena, .layouts = layouts, .prefix_key = prefix_key, .pane_gap = zon_config.pane_gap orelse 1 };
 }
 
 /// Read and parse a ZON config file from the given path.
@@ -210,6 +215,7 @@ pub fn printTree(writer: anytype, pane: Pane, indent: usize) !void {
             for (leaf.command) |arg| {
                 try writer.print(" {s}", .{arg});
             }
+            if (leaf.name.len > 0) try writer.print(" [name={s}]", .{leaf.name});
             if (leaf.mouse != .capture) try writer.print(" [mouse={s}]", .{@tagName(leaf.mouse)});
             if (leaf.restart != .never) try writer.print(" [restart={s}]", .{@tagName(leaf.restart)});
             switch (leaf.size) {
@@ -452,6 +458,14 @@ test "printTree: leaf pane output" {
     try std.testing.expectEqualStrings("leaf: npm run dev\n", fbs.getWritten());
 }
 
+test "printTree: leaf pane with name" {
+    var buf: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const pane = Pane{ .leaf = .{ .command = &.{"bash"}, .name = "editor" } };
+    try printTree(fbs.writer(), pane, 0);
+    try std.testing.expectEqualStrings("leaf: bash [name=editor]\n", fbs.getWritten());
+}
+
 test "printTree: split pane output" {
     var buf: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -566,6 +580,41 @@ test "parseFromSlice: prefix_key is parsed" {
     try std.testing.expectEqual(@as(u8, 0x02), config.prefix_key);
 }
 
+test "parseFromSlice: pane_gap is parsed" {
+    const source =
+        \\.{
+        \\    .pane_gap = 2,
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"} },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    try std.testing.expectEqual(@as(u16, 2), config.pane_gap);
+}
+
+test "parseFromSlice: default pane_gap is 1 when not specified" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"} },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    try std.testing.expectEqual(@as(u16, 1), config.pane_gap);
+}
+
 test "parseFromSlice: default prefix_key is Ctrl+S when not specified" {
     const source =
         \\.{
@@ -581,6 +630,120 @@ test "parseFromSlice: default prefix_key is Ctrl+S when not specified" {
     defer config.deinit();
 
     try std.testing.expectEqual(@as(u8, 0x13), config.prefix_key);
+}
+
+test "convertPane: leaf pane preserves name field" {
+    const zp = ZonPane{ .command = &.{"bash"}, .name = "editor" };
+    const pane = try convertPane(std.testing.allocator, zp);
+    try std.testing.expectEqualStrings("editor", pane.leaf.name);
+}
+
+test "convertPane: leaf pane name defaults to empty string" {
+    const zp = ZonPane{ .command = &.{"bash"} };
+    const pane = try convertPane(std.testing.allocator, zp);
+    try std.testing.expectEqualStrings("", pane.leaf.name);
+}
+
+test "parseFromSlice: leaf with name field" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"}, .name = "editor" },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    const layout = config.getLayout("default");
+    try std.testing.expect(layout != null);
+    try std.testing.expectEqualStrings("editor", layout.?.root.leaf.name);
+}
+
+test "parseFromSlice: leaf without name defaults to empty" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "default",
+        \\            .root = .{ .command = .{"bash"} },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    const layout = config.getLayout("default");
+    try std.testing.expect(layout != null);
+    try std.testing.expectEqualStrings("", layout.?.root.leaf.name);
+}
+
+test "parseFromSlice: mixed named and unnamed panes in split" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "mixed",
+        \\            .root = .{
+        \\                .direction = .horizontal,
+        \\                .children = .{
+        \\                    .{ .command = .{"bash"}, .name = "named" },
+        \\                    .{ .command = .{"bash"} },
+        \\                    .{ .command = .{"bash"}, .name = "also-named" },
+        \\                },
+        \\            },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    const layout = config.getLayout("mixed");
+    try std.testing.expect(layout != null);
+    const children = layout.?.root.split.children;
+    try std.testing.expectEqualStrings("named", children[0].leaf.name);
+    try std.testing.expectEqualStrings("", children[1].leaf.name);
+    try std.testing.expectEqualStrings("also-named", children[2].leaf.name);
+}
+
+test "parseFromSlice: nested split with names" {
+    const source =
+        \\.{
+        \\    .layouts = .{
+        \\        .{
+        \\            .name = "dev",
+        \\            .root = .{
+        \\                .direction = .horizontal,
+        \\                .children = .{
+        \\                    .{ .command = .{"bash"}, .name = "editor", .size = .{ .percent = 60 } },
+        \\                    .{
+        \\                        .direction = .vertical,
+        \\                        .children = .{
+        \\                            .{ .command = .{"bash"}, .name = "server" },
+        \\                            .{ .command = .{"bash"}, .name = "terminal" },
+        \\                        },
+        \\                    },
+        \\                },
+        \\            },
+        \\        },
+        \\    },
+        \\}
+    ;
+    var config = try parseFromSlice(std.testing.allocator, source);
+    defer config.deinit();
+
+    const layout = config.getLayout("dev");
+    try std.testing.expect(layout != null);
+    const root = layout.?.root.split;
+    try std.testing.expectEqualStrings("editor", root.children[0].leaf.name);
+    const right = root.children[1].split;
+    try std.testing.expectEqualStrings("server", right.children[0].leaf.name);
+    try std.testing.expectEqualStrings("terminal", right.children[1].leaf.name);
 }
 
 test "nested split layout structure" {

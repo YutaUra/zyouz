@@ -27,6 +27,7 @@ jobs:
         target:
           - x86_64-linux
           - aarch64-linux
+          - x86_64-macos
           - aarch64-macos
     runs-on: ubuntu-latest
     steps:

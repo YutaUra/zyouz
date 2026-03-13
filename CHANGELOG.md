@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-03-13
+
+### Added
+
+- **Nix flake package**: `nix profile install github:YutaUra/zyouz` or `nix run github:YutaUra/zyouz`
+- **Homebrew formula**: `brew install YutaUra/tap/zyouz`
+- **Intel Mac (x86_64-macos) build** in CI release artifacts
+- **Nix CI workflow** with Cachix binary cache
+- **Homebrew auto-update workflow** for homebrew-tap
+
 ## [0.1.0] - 2026-03-13
 
 Initial release.

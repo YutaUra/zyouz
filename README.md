@@ -8,6 +8,24 @@ just panes.
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install YutaUra/tap/zyouz
+```
+
+### Nix
+
+```sh
+nix profile install github:YutaUra/zyouz
+```
+
+Or run without installing:
+
+```sh
+nix run github:YutaUra/zyouz
+```
+
 ### Build from source
 
 Requires [Zig](https://ziglang.org/) 0.15.2 or later.

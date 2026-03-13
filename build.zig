@@ -60,7 +60,8 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const options = b.addOptions();
-    options.addOption([]const u8, "version", "0.1.0");
+    const zon = @import("build.zig.zon");
+    options.addOption([]const u8, "version", zon.version);
 
     const exe = b.addExecutable(.{
         .name = "zyouz",

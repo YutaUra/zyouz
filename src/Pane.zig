@@ -76,6 +76,11 @@ pub fn deinit(self: *Pane) void {
 
 pub fn feedOutput(self: *Pane, data: []const u8) void {
     self.parser.feed(data);
+    // Forward any pending query responses (DSR, DA1) back to the child.
+    if (self.parser.response_len > 0) {
+        _ = self.pty.writeInput(self.parser.response_buf[0..self.parser.response_len]) catch {};
+        self.parser.response_len = 0;
+    }
 }
 
 pub fn scrollViewUp(self: *Pane, n: usize) void {

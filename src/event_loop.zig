@@ -129,9 +129,10 @@ pub fn runMultiPane(
     var drag_state: ?DragState = null;
     var buf: [4096]u8 = undefined;
 
-    // Initial render
+    // Initial render — clear screen once to start with a clean slate.
+    try terminal.writeAll("\x1b[2J");
     recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
-    try renderAll(terminal, renderer, panes, rects, active_pane.*);
+    try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*);
 
     while (true) {
         // Build pollfd array: [terminal, pane0_pty, pane1_pty, ..., signal_pipe]
@@ -179,25 +180,33 @@ pub fn runMultiPane(
             renderer.deinit();
             renderer.* = try Renderer.init(allocator, size.cols, size.rows);
             recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
+            // Clear screen on resize to remove stale content from the old layout.
+            try terminal.writeAll("\x1b[2J");
             needs_render = true;
         }
 
-        // Handle PTY output for alive panes
+        // Handle PTY output for alive panes.
+        // Drain all available data before rendering so the cursor
+        // and screen state reflect the child's final output, not an
+        // intermediate position (e.g. after drawing the status bar
+        // but before repositioning the cursor to the prompt).
         for (panes, 0..) |*pane, i| {
             if (!pane.isAlive()) continue;
             const fd_idx = i + 1;
             if (fds[fd_idx].revents & posix.POLL.IN != 0) {
-                const n = pane.pty.read(&buf) catch {
-                    handlePaneExit(pane);
-                    needs_render = true;
-                    continue;
-                };
-                if (n == 0) {
-                    handlePaneExit(pane);
-                    needs_render = true;
-                    continue;
+                while (true) {
+                    const n = pane.pty.read(&buf) catch {
+                        handlePaneExit(pane);
+                        break;
+                    };
+                    if (n == 0) {
+                        handlePaneExit(pane);
+                        break;
+                    }
+                    pane.feedOutput(buf[0..n]);
+                    // Buffer not full — no more data waiting right now.
+                    if (n < buf.len) break;
                 }
-                pane.feedOutput(buf[0..n]);
                 needs_render = true;
             }
             if (fds[fd_idx].revents & posix.POLL.HUP != 0) {
@@ -278,7 +287,7 @@ pub fn runMultiPane(
         }
 
         if (needs_render) {
-            try renderAll(terminal, renderer, panes, rects, active_pane.*);
+            try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*);
         }
     }
 }
@@ -637,6 +646,7 @@ fn recomputeBorders(renderer: *Renderer, panes: []const Pane, rects: []const Lay
 }
 
 fn renderAll(
+    allocator: std.mem.Allocator,
     terminal: *Terminal.Terminal,
     renderer: *const Renderer,
     panes: []Pane,
@@ -652,23 +662,22 @@ fn renderAll(
         scroll_offsets[i] = pane.scroll_offset;
     }
 
-    var render_buf: [65536]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&render_buf);
-    const writer = fbs.writer();
+    // Dynamic buffer: typical frame is 50-200 KB for colorful content.
+    var render_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer render_buf.deinit(allocator);
+    const writer = render_buf.writer(allocator);
 
-    renderer.renderFrameWithScrollback(
+    try renderer.renderFrameWithScrollback(
         writer,
         screens[0..panes.len],
         rects,
         scroll_offsets[0..panes.len],
         active_pane,
-    ) catch {
-        return;
-    };
+    );
 
     // Render exit status overlays for exited panes
     const states = buildPaneStates(panes);
     renderer.renderExitStatuses(writer, rects, states[0..panes.len]) catch {};
 
-    try terminal.writeAll(fbs.getWritten());
+    try terminal.writeAll(render_buf.items);
 }

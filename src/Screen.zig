@@ -23,7 +23,32 @@ pub const Cell = struct {
     fg: Color = .default,
     bg: Color = .default,
     style: Style = .{},
+    /// True when this cell is the left half of a wide (2-column) character.
+    /// The right half is a continuation cell with char = 0.
+    wide: bool = false,
 };
+
+/// Return the display width of a Unicode codepoint: 2 for fullwidth/wide
+/// characters (CJK ideographs, Hangul syllables, fullwidth forms, etc.),
+/// 1 for everything else.
+pub fn charWidth(cp: u21) u2 {
+    if (cp < 0x1100) return 1;
+    if (cp <= 0x115F) return 2; // Hangul Jamo
+    if (cp >= 0x2329 and cp <= 0x232A) return 2; // Angle brackets
+    if (cp >= 0x2E80 and cp <= 0x303E) return 2; // CJK Radicals, Kangxi, Symbols
+    if (cp >= 0x3040 and cp <= 0x33FF) return 2; // Hiragana, Katakana, Bopomofo, etc.
+    if (cp >= 0x3400 and cp <= 0x4DBF) return 2; // CJK Extension A
+    if (cp >= 0x4E00 and cp <= 0xA4CF) return 2; // CJK Unified + Yi
+    if (cp >= 0xAC00 and cp <= 0xD7A3) return 2; // Hangul Syllables
+    if (cp >= 0xF900 and cp <= 0xFAFF) return 2; // CJK Compat Ideographs
+    if (cp >= 0xFE10 and cp <= 0xFE19) return 2; // Vertical forms
+    if (cp >= 0xFE30 and cp <= 0xFE4F) return 2; // CJK Compat Forms
+    if (cp >= 0xFF01 and cp <= 0xFF60) return 2; // Fullwidth Forms
+    if (cp >= 0xFFE0 and cp <= 0xFFE6) return 2; // Fullwidth Signs
+    if (cp >= 0x20000 and cp <= 0x2FFFD) return 2; // CJK Extensions B-F
+    if (cp >= 0x30000 and cp <= 0x3FFFD) return 2; // CJK Extension G
+    return 1;
+}
 
 const Screen = @This();
 
@@ -116,6 +141,8 @@ pub fn cellAtMut(self: *Screen, row: u16, col: u16) *Cell {
 }
 
 pub fn writeChar(self: *Screen, char: u21) void {
+    const w: u2 = charWidth(char);
+
     if (self.wrap_pending) {
         self.wrap_pending = false;
         self.cursor_col = 0;
@@ -126,18 +153,65 @@ pub fn writeChar(self: *Screen, char: u21) void {
         }
     }
 
+    // Wide character at the last column: can't fit both halves.
+    // Leave the column blank and move to the next line.
+    if (w == 2 and self.cursor_col + 1 >= self.width) {
+        self.cellAtMut(self.cursor_row, self.cursor_col).* = .{};
+        self.cursor_col = 0;
+        if (self.cursor_row >= self.scroll_bottom) {
+            self.scrollUp(1);
+        } else {
+            self.cursor_row += 1;
+        }
+    }
+
+    // Clean up if overwriting part of a previous wide character.
+    {
+        const cur = self.cellAtMut(self.cursor_row, self.cursor_col);
+        if (cur.wide and self.cursor_col + 1 < self.width) {
+            self.cellAtMut(self.cursor_row, self.cursor_col + 1).* = .{};
+        }
+        if (cur.char == 0 and self.cursor_col > 0) {
+            const prev = self.cellAtMut(self.cursor_row, self.cursor_col - 1);
+            if (prev.wide) prev.* = .{};
+        }
+    }
+
     const cell = self.cellAtMut(self.cursor_row, self.cursor_col);
     cell.* = .{
         .char = char,
         .fg = self.current_fg,
         .bg = self.current_bg,
         .style = self.current_style,
+        .wide = (w == 2),
     };
 
-    if (self.cursor_col >= self.width - 1) {
-        self.wrap_pending = true;
+    if (w == 2) {
+        // Write continuation marker in the next column.
+        if (self.cursor_col + 1 < self.width) {
+            const next = self.cellAtMut(self.cursor_row, self.cursor_col + 1);
+            // If the next cell was itself the left half of a wide char, clean up.
+            if (next.wide and self.cursor_col + 2 < self.width) {
+                self.cellAtMut(self.cursor_row, self.cursor_col + 2).* = .{};
+            }
+            next.* = .{
+                .char = 0,
+                .fg = self.current_fg,
+                .bg = self.current_bg,
+                .style = self.current_style,
+            };
+        }
+        if (self.cursor_col + 2 >= self.width) {
+            self.wrap_pending = true;
+        } else {
+            self.cursor_col += 2;
+        }
     } else {
-        self.cursor_col += 1;
+        if (self.cursor_col >= self.width - 1) {
+            self.wrap_pending = true;
+        } else {
+            self.cursor_col += 1;
+        }
     }
 }
 
@@ -151,6 +225,7 @@ pub fn newline(self: *Screen) void {
 
 pub fn carriageReturn(self: *Screen) void {
     self.cursor_col = 0;
+    self.wrap_pending = false;
 }
 
 pub fn tab(self: *Screen) void {
@@ -743,4 +818,24 @@ test "scrollbackLine returns null for out-of-range index" {
 
     try std.testing.expect(screen.scrollbackLine(0) != null);
     try std.testing.expect(screen.scrollbackLine(1) == null);
+}
+
+test "carriageReturn clears wrap_pending" {
+    var screen = try Screen.init(std.testing.allocator, 5, 2);
+    defer screen.deinit();
+
+    // Fill the line to trigger wrap_pending.
+    for ("ABCDE") |c| screen.writeChar(c);
+    try std.testing.expect(screen.wrap_pending);
+
+    // CR should go back to column 0 on the SAME line and clear wrap_pending.
+    screen.carriageReturn();
+    try std.testing.expect(!screen.wrap_pending);
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_col);
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_row);
+
+    // Writing after CR overwrites on the same line, not the next.
+    screen.writeChar('X');
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_row);
+    try std.testing.expectEqual(@as(u21, 'X'), screen.cellAt(0, 0).char);
 }

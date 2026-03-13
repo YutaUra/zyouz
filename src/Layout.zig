@@ -32,7 +32,8 @@ fn childSize(child: Config.Pane) Config.SizeMode {
 }
 
 fn computeSplit(allocator: Allocator, split: Config.Pane.Split, area: Rect, gap: u16) Allocator.Error![]Rect {
-    const n: u16 = @intCast(split.children.len);
+    const child_count = split.children.len;
+    const n: u16 = @intCast(child_count);
     const borders: u16 = n - 1;
     // gap=0: shared border (1 cell). gap=1: adjacent separate borders (2 cells). etc.
     const divider_width: u16 = 1 + gap;
@@ -52,19 +53,17 @@ fn computeSplit(allocator: Allocator, split: Config.Pane.Split, area: Rect, gap:
         }
     }
 
-    // Pass 2: distribute remaining space among equal children.
     const remaining = available -| claimed;
     const equal_base = if (equal_count > 0) remaining / equal_count else 0;
     const equal_rem = if (equal_count > 0) remaining % equal_count else 0;
 
-    var result = std.array_list.AlignedManaged(Rect, null).init(allocator);
-    defer result.deinit();
-
-    var offset: u16 = if (is_horizontal) area.col else area.row;
+    // Pass 2: compute initial sizes into a buffer.
+    var sizes_buf: [64]u16 = undefined;
+    const sizes = sizes_buf[0..child_count];
     var equal_idx: u16 = 0;
-
-    for (split.children) |child| {
-        const child_size: u16 = switch (childSize(child)) {
+    var total_assigned: u16 = 0;
+    for (split.children, 0..) |child, i| {
+        sizes[i] = switch (childSize(child)) {
             .fixed => |f| @min(f, available),
             .percent => |p| available * p / 100,
             .equal => blk: {
@@ -73,6 +72,44 @@ fn computeSplit(allocator: Allocator, split: Config.Pane.Split, area: Rect, gap:
                 break :blk equal_base + extra;
             },
         };
+        total_assigned += sizes[i];
+    }
+
+    // Pass 3: distribute truncation remainder to largest children first.
+    // Integer division in percent calculations may leave unused space;
+    // handing it all to the last child looks unbalanced, so we spread
+    // +1 to each child in descending-size order instead.
+    var trunc_rem = available -| total_assigned;
+    if (trunc_rem > 0) {
+        var order_buf: [64]usize = undefined;
+        const order = order_buf[0..child_count];
+        for (order, 0..) |*o, i| o.* = i;
+        // Stable insertion sort by sizes[] descending.
+        for (1..child_count) |ii| {
+            const key = order[ii];
+            const key_size = sizes[key];
+            var j = ii;
+            while (j > 0 and sizes[order[j - 1]] < key_size) {
+                order[j] = order[j - 1];
+                j -= 1;
+            }
+            order[j] = key;
+        }
+        var ri: usize = 0;
+        while (trunc_rem > 0) : (trunc_rem -= 1) {
+            sizes[order[ri % child_count]] += 1;
+            ri += 1;
+        }
+    }
+
+    // Pass 4: build result rectangles using adjusted sizes.
+    var result = std.array_list.AlignedManaged(Rect, null).init(allocator);
+    defer result.deinit();
+
+    var offset: u16 = if (is_horizontal) area.col else area.row;
+
+    for (split.children, 0..) |child, i| {
+        const child_size = sizes[i];
 
         const child_area = if (is_horizontal)
             Rect{ .col = offset, .row = area.row, .width = child_size, .height = area.height }
@@ -676,6 +713,57 @@ test "borderAt with gap=2 returns info on all divider cells" {
         try std.testing.expectEqual(@as(usize, 0), info.?.pane_before);
         try std.testing.expectEqual(@as(usize, 1), info.?.pane_after);
     }
+}
+
+test "percent truncation remainder distributed to largest child first" {
+    // width=80, 2 children 60%/40%: border=1 → 79 usable
+    // child0: 79*60/100=47, child1: 79*40/100=31, total=78, remainder=1
+    // child0 (47) is larger → gets +1 → [48, 31]
+    const pane = Config.Pane{ .split = .{
+        .direction = .horizontal,
+        .children = &.{
+            Config.Pane{ .leaf = .{ .command = &.{"a"}, .size = .{ .percent = 60 } } },
+            Config.Pane{ .leaf = .{ .command = &.{"b"}, .size = .{ .percent = 40 } } },
+        },
+    } };
+    const area = Rect{ .col = 0, .row = 0, .width = 80, .height = 24 };
+
+    const rects = try compute(std.testing.allocator, pane, area, 0);
+    defer std.testing.allocator.free(rects);
+
+    try std.testing.expectEqual(@as(usize, 2), rects.len);
+    try std.testing.expectEqual(@as(u16, 48), rects[0].width);
+    try std.testing.expectEqual(@as(u16, 31), rects[1].width);
+    // Total: 48 + 1 (border) + 31 = 80
+    try std.testing.expectEqual(@as(u16, 80), rects[0].width + 1 + rects[1].width);
+}
+
+test "three percent children share truncation remainder" {
+    // width=101, 3 children 33%/33%/34%: borders=2 → 99 usable
+    // child0: 99*33/100=32, child1: 99*33/100=32, child2: 99*34/100=33
+    // total=97, remainder=2
+    // Sorted desc: child2(33), child0(32), child1(32)
+    // child2 gets +1 → 34, child0 gets +1 → 33
+    // Result: [33, 32, 34]
+    const pane = Config.Pane{ .split = .{
+        .direction = .horizontal,
+        .children = &.{
+            Config.Pane{ .leaf = .{ .command = &.{"a"}, .size = .{ .percent = 33 } } },
+            Config.Pane{ .leaf = .{ .command = &.{"b"}, .size = .{ .percent = 33 } } },
+            Config.Pane{ .leaf = .{ .command = &.{"c"}, .size = .{ .percent = 34 } } },
+        },
+    } };
+    const area = Rect{ .col = 0, .row = 0, .width = 101, .height = 24 };
+
+    const rects = try compute(std.testing.allocator, pane, area, 0);
+    defer std.testing.allocator.free(rects);
+
+    try std.testing.expectEqual(@as(usize, 3), rects.len);
+    try std.testing.expectEqual(@as(u16, 33), rects[0].width);
+    try std.testing.expectEqual(@as(u16, 32), rects[1].width);
+    try std.testing.expectEqual(@as(u16, 34), rects[2].width);
+    // Total: 33 + 1 + 32 + 1 + 34 = 101
+    try std.testing.expectEqual(@as(u16, 101), rects[0].width + 1 + rects[1].width + 1 + rects[2].width);
 }
 
 test "mixed percent, fixed, and equal sizing" {

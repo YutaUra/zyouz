@@ -10,6 +10,7 @@ const State = enum {
     csi_param,
     csi_intermediate,
     osc_string,
+    utf8,
 };
 
 const max_params = 16;
@@ -19,6 +20,13 @@ state: State,
 params: [max_params]u16,
 param_count: u8,
 private_mode: bool,
+utf8_buf: [4]u8 = undefined,
+utf8_len: u3 = 0,
+utf8_expected: u3 = 0,
+/// Buffer for responses to terminal queries (DSR, DA1).
+/// Caller should forward these bytes back to the child PTY.
+response_buf: [64]u8 = undefined,
+response_len: u8 = 0,
 
 pub fn init(screen: *Screen) VtParser {
     return .{
@@ -43,6 +51,7 @@ fn processByte(self: *VtParser, byte: u8) void {
         .csi_entry, .csi_param => self.processCsi(byte),
         .csi_intermediate => self.processCsiIntermediate(byte),
         .osc_string => self.processOsc(byte),
+        .utf8 => self.processUtf8(byte),
     }
 }
 
@@ -57,7 +66,44 @@ fn processGround(self: *VtParser, byte: u8) void {
         0x00...0x06, 0x0E...0x1A, 0x1C...0x1F => {}, // other C0 — ignore
         0x20...0x7E => self.screen.writeChar(@as(u21, byte)),
         0x7F => {}, // DEL — ignore
-        0x80...0xFF => {}, // high bytes — ignore for now
+        0x80...0xBF => {}, // stray continuation bytes — ignore
+        0xC0...0xDF => self.startUtf8(byte, 2),
+        0xE0...0xEF => self.startUtf8(byte, 3),
+        0xF0...0xF7 => self.startUtf8(byte, 4),
+        0xF8...0xFF => {}, // invalid UTF-8 leading bytes — ignore
+    }
+}
+
+fn startUtf8(self: *VtParser, byte: u8, expected: u3) void {
+    self.utf8_buf[0] = byte;
+    self.utf8_len = 1;
+    self.utf8_expected = expected;
+    self.state = .utf8;
+}
+
+fn processUtf8(self: *VtParser, byte: u8) void {
+    // C0 controls and ESC interrupt UTF-8 sequence
+    if (byte <= 0x1F or byte == 0x7F) {
+        self.state = .ground;
+        self.processGround(byte);
+        return;
+    }
+    // Must be a continuation byte (0x80-0xBF)
+    if (byte & 0xC0 != 0x80) {
+        // Not a continuation byte — abort sequence, reprocess as ground
+        self.state = .ground;
+        self.processGround(byte);
+        return;
+    }
+    self.utf8_buf[self.utf8_len] = byte;
+    self.utf8_len += 1;
+    if (self.utf8_len == self.utf8_expected) {
+        const cp = std.unicode.utf8Decode(self.utf8_buf[0..self.utf8_len]) catch {
+            self.state = .ground;
+            return;
+        };
+        self.screen.writeChar(cp);
+        self.state = .ground;
     }
 }
 
@@ -206,6 +252,22 @@ fn dispatchCsi(self: *VtParser, final: u8) void {
         'X' => { // ECH — Erase Character
             const n = self.getParam(0, 1);
             self.eraseChars(n);
+        },
+        'n' => { // DSR — Device Status Report
+            const mode = self.getParam(0, 0);
+            if (mode == 6) {
+                // CPR — Cursor Position Report (1-based)
+                const row = self.screen.cursor_row + 1;
+                const col = self.screen.cursor_col + 1;
+                const resp = std.fmt.bufPrint(&self.response_buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
+                self.response_len = @intCast(resp.len);
+            }
+        },
+        'c' => { // DA1 — Device Attributes
+            // Respond as VT100 with Advanced Video Option.
+            const resp = "\x1b[?1;2c";
+            @memcpy(self.response_buf[0..resp.len], resp);
+            self.response_len = @intCast(resp.len);
         },
         else => {}, // Unknown CSI — ignore
     }

@@ -129,7 +129,16 @@ pub const Pty = struct {
             _ = self.checkExited();
             if (self.cached_exit_code == null) {
                 self.sendSignal(posix.SIG.KILL) catch {};
-                _ = posix.waitpid(self.child_pid, 0);
+                // Non-blocking reap with brief timeout.
+                // Blocking waitpid would hang if the child is in an
+                // uninterruptible state, preventing zyouz from exiting.
+                // Any remaining zombie is cleaned up when zyouz exits.
+                var attempts: u32 = 0;
+                while (attempts < 20) : (attempts += 1) {
+                    _ = self.checkExited();
+                    if (self.cached_exit_code != null) break;
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                }
             }
         }
         posix.close(self.master_fd);

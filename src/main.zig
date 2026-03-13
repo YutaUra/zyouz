@@ -125,7 +125,6 @@ pub fn main() !void {
     defer terminal.deinit();
 
     try terminal.enableRawMode();
-    defer terminal.disableRawMode();
 
     const size = try terminal.getSize();
 
@@ -169,7 +168,15 @@ pub fn main() !void {
 
     // Now enter alternate screen — all fallible setup is done.
     try terminal.enterAlternateScreen();
-    defer terminal.leaveAlternateScreen() catch {};
+
+    // Terminal restoration: declared AFTER pane/renderer setup so it runs
+    // BEFORE their defers (Zig defers are LIFO). This ensures the terminal
+    // is fully restored even if pane cleanup blocks on waitpid.
+    defer {
+        terminal.writeAll("\x1b[?25h\x1b[0m") catch {};
+        terminal.leaveAlternateScreen() catch {};
+        terminal.disableRawMode();
+    }
 
     // Run multi-pane event loop
     var active_pane: usize = 0;

@@ -261,6 +261,10 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
         while (col < screen.width) : (col += 1) {
             const cell = screen.cellAt(row, col);
 
+            // Skip continuation cells (right half of wide characters).
+            // The wide character already consumed 2 terminal columns.
+            if (cell.char == 0) continue;
+
             // Emit SGR only when attributes change
             if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
                 !std.meta.eql(cell.style, last_style))
@@ -324,6 +328,9 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
                     break :blk screen.cellAt(screen_row, col);
                 }
             };
+
+            // Skip continuation cells (right half of wide characters).
+            if (cell.char == 0) continue;
 
             if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
                 !std.meta.eql(cell.style, last_style))
@@ -495,8 +502,10 @@ pub fn renderFrame(
     rects: []const Layout.Rect,
     active_pane: usize,
 ) !void {
-    // Hide cursor and clear screen to avoid stale characters on resize
-    try writer.writeAll("\x1b[?25l\x1b[2J");
+    // Begin synchronized update — the terminal buffers all output and
+    // applies it atomically, eliminating flicker.  Terminals that do
+    // not support mode 2026 simply ignore the sequence.
+    try writer.writeAll("\x1b[?2026h\x1b[?25l");
 
     // Render all panes
     for (screens, rects) |screen, rect| {
@@ -519,6 +528,9 @@ pub fn renderFrame(
             try writer.writeAll("\x1b[?25h");
         }
     }
+
+    // End synchronized update — terminal renders the frame now.
+    try writer.writeAll("\x1b[?2026l");
 }
 
 pub fn renderFrameWithScrollback(
@@ -529,7 +541,8 @@ pub fn renderFrameWithScrollback(
     scroll_offsets: []const usize,
     active_pane: usize,
 ) !void {
-    try writer.writeAll("\x1b[?25l\x1b[2J");
+    // Begin synchronized update — prevents flicker by buffering in the terminal.
+    try writer.writeAll("\x1b[?2026h\x1b[?25l");
 
     for (screens, rects, scroll_offsets) |screen, rect, offset| {
         try self.renderPaneWithOffset(writer, screen, rect, offset);
@@ -552,6 +565,9 @@ pub fn renderFrameWithScrollback(
             }
         }
     }
+
+    // End synchronized update — terminal renders the frame now.
+    try writer.writeAll("\x1b[?2026l");
 }
 
 fn writeSgr(
@@ -618,6 +634,18 @@ fn writeSgr(
 
 fn writeCellSgr(writer: anytype, cell: *const Screen.Cell) !void {
     try writer.writeAll("\x1b[0m");
+
+    // Style attributes
+    if (cell.style.bold) try writer.writeAll("\x1b[1m");
+    if (cell.style.dim) try writer.writeAll("\x1b[2m");
+    if (cell.style.italic) try writer.writeAll("\x1b[3m");
+    if (cell.style.underline) try writer.writeAll("\x1b[4m");
+    if (cell.style.blink) try writer.writeAll("\x1b[5m");
+    if (cell.style.inverse) try writer.writeAll("\x1b[7m");
+    if (cell.style.hidden) try writer.writeAll("\x1b[8m");
+    if (cell.style.strikethrough) try writer.writeAll("\x1b[9m");
+
+    // Foreground
     switch (cell.fg) {
         .default => {},
         .indexed => |idx| {
@@ -631,6 +659,23 @@ fn writeCellSgr(writer: anytype, cell: *const Screen.Cell) !void {
         },
         .rgb => |c| {
             try std.fmt.format(writer, "\x1b[38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
+        },
+    }
+
+    // Background
+    switch (cell.bg) {
+        .default => {},
+        .indexed => |idx| {
+            if (idx < 8) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) + 40});
+            } else if (idx < 16) {
+                try std.fmt.format(writer, "\x1b[{d}m", .{@as(u16, idx) - 8 + 100});
+            } else {
+                try std.fmt.format(writer, "\x1b[48;5;{d}m", .{idx});
+            }
+        },
+        .rgb => |c| {
+            try std.fmt.format(writer, "\x1b[48;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
         },
     }
 }
@@ -800,8 +845,8 @@ test "full render hides cursor at start" {
     try renderer.renderFrame(buf.writer(std.testing.allocator), screens, rects, 0);
     const output = buf.items;
 
-    // Starts with hide cursor
-    try std.testing.expect(std.mem.startsWith(u8, output, "\x1b[?25l"));
+    // Starts with synchronized update + hide cursor
+    try std.testing.expect(std.mem.startsWith(u8, output, "\x1b[?2026h\x1b[?25l"));
 }
 
 // --- Scrollback render tests ---

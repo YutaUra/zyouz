@@ -1,10 +1,62 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const zyouz = @import("zyouz");
 
 const Config = zyouz.Config;
 const Layout = zyouz.Layout;
 const Pane = zyouz.Pane;
 const Renderer = zyouz.Renderer;
+
+pub const version = build_options.version;
+
+const CliAction = union(enum) {
+    version,
+    help,
+    run: ?[]const u8,
+};
+
+fn parseArgs(args: []const [:0]const u8) CliAction {
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
+            return .version;
+        }
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return .help;
+        }
+    }
+    if (args.len > 1) {
+        return .{ .run = args[1] };
+    }
+    return .{ .run = null };
+}
+
+fn configErrorMessage(err: Config.ParseError) []const u8 {
+    return switch (err) {
+        error.ParseZon => "syntax error in config file",
+        error.ReadFileFailed => "could not read config file",
+        error.EmptyCommand => "a pane has an empty command",
+        error.EmptyChildren => "a split pane has no children",
+        error.LeafAndSplit => "a pane has both 'command' and 'direction' (must be one or the other)",
+        error.NeitherLeafNorSplit => "a pane has neither 'command' nor 'direction'",
+        error.DirectionWithoutChildren => "a pane has 'direction' but no 'children'",
+        error.ChildrenWithoutDirection => "a pane has 'children' but no 'direction'",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+const usage_text =
+    \\Usage: zyouz [OPTIONS] [LAYOUT]
+    \\
+    \\A terminal multiplexer driven by a static config file.
+    \\
+    \\Arguments:
+    \\  [LAYOUT]    Name of the layout to use (default: "default")
+    \\
+    \\Options:
+    \\  -h, --help       Print this help message and exit
+    \\  -v, --version    Print version and exit
+    \\
+;
 
 fn collectLeaves(pane: Config.Pane, out: *std.ArrayListUnmanaged(Config.Pane.Leaf)) !void {
     switch (pane) {
@@ -25,14 +77,29 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const layout_name: ?[]const u8 = if (args.len > 1) args[1] else null;
+    const action = parseArgs(args);
+    switch (action) {
+        .version => {
+            const stdout = std.fs.File.stdout();
+            stdout.writeAll("zyouz " ++ version ++ "\n") catch {};
+            return;
+        },
+        .help => {
+            const stdout = std.fs.File.stdout();
+            stdout.writeAll(usage_text) catch {};
+            return;
+        },
+        .run => {},
+    }
+
+    const layout_name: ?[]const u8 = action.run;
 
     const config_path = try Config.defaultConfigPath(allocator);
     defer allocator.free(config_path);
 
     var config = Config.parseFile(allocator, config_path) catch |err| {
-        std.debug.print("error: failed to load config from {s}: {s}\n", .{ config_path, @errorName(err) });
-        std.debug.print("hint: set ZYOUZ_CONFIG to override the config file path\n", .{});
+        std.debug.print("error: failed to load config from {s}\n", .{config_path});
+        std.debug.print("  {s}\n", .{configErrorMessage(err)});
         std.process.exit(1);
     };
     defer config.deinit();
@@ -117,4 +184,61 @@ pub fn main() !void {
         config.prefix_key,
         config.pane_gap,
     ) catch {};
+}
+
+// --- Tests ---
+
+test "parseArgs: --version returns version action" {
+    const args: []const [:0]const u8 = &.{ "zyouz", "--version" };
+    const action = parseArgs(args);
+    try std.testing.expect(action == .version);
+}
+
+test "parseArgs: -v returns version action" {
+    const args: []const [:0]const u8 = &.{ "zyouz", "-v" };
+    const action = parseArgs(args);
+    try std.testing.expect(action == .version);
+}
+
+test "parseArgs: --help returns help action" {
+    const args: []const [:0]const u8 = &.{ "zyouz", "--help" };
+    const action = parseArgs(args);
+    try std.testing.expect(action == .help);
+}
+
+test "parseArgs: -h returns help action" {
+    const args: []const [:0]const u8 = &.{ "zyouz", "-h" };
+    const action = parseArgs(args);
+    try std.testing.expect(action == .help);
+}
+
+test "parseArgs: layout name returns run action with name" {
+    const args: []const [:0]const u8 = &.{ "zyouz", "dev" };
+    const action = parseArgs(args);
+    try std.testing.expectEqualStrings("dev", action.run.?);
+}
+
+test "parseArgs: no args returns run action with null" {
+    const args: []const [:0]const u8 = &.{"zyouz"};
+    const action = parseArgs(args);
+    try std.testing.expect(action == .run);
+    try std.testing.expect(action.run == null);
+}
+
+test "version: matches build options" {
+    try std.testing.expectEqualStrings("0.1.0", version);
+}
+
+test "configErrorMessage: returns specific messages per error" {
+    try std.testing.expectEqualStrings("syntax error in config file", configErrorMessage(error.ParseZon));
+    try std.testing.expectEqualStrings("could not read config file", configErrorMessage(error.ReadFileFailed));
+    try std.testing.expectEqualStrings("a pane has an empty command", configErrorMessage(error.EmptyCommand));
+    try std.testing.expectEqualStrings("a split pane has no children", configErrorMessage(error.EmptyChildren));
+    try std.testing.expectEqualStrings("out of memory", configErrorMessage(error.OutOfMemory));
+}
+
+test "usage_text: contains help and version flags" {
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "--help") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "--version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "LAYOUT") != null);
 }

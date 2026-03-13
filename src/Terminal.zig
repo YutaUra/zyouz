@@ -53,6 +53,16 @@ pub const Terminal = struct {
         try self.writeAll("\x1b[?1049l");
     }
 
+    pub fn enableMouseTracking(self: *const Terminal) !void {
+        // Enable button-event tracking (reports drag) + SGR extended coordinates.
+        // ?1002h = report press, release, and motion-while-button-held.
+        try self.writeAll("\x1b[?1002h\x1b[?1006h");
+    }
+
+    pub fn disableMouseTracking(self: *const Terminal) !void {
+        try self.writeAll("\x1b[?1006l\x1b[?1002l");
+    }
+
     pub fn getSize(self: *const Terminal) !Size {
         var ws: posix.winsize = undefined;
         const rc = std.c.ioctl(self.fd, std.c.T.IOCGWINSZ, @intFromPtr(&ws));

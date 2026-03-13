@@ -5,6 +5,7 @@ const VtParser = @import("VtParser.zig");
 const Pty = @import("Pty.zig");
 const Terminal = @import("Terminal.zig");
 const Layout = @import("Layout.zig");
+const Config = @import("Config.zig");
 
 const Pane = @This();
 
@@ -13,6 +14,8 @@ screen: Screen,
 parser: VtParser,
 rect: Layout.Rect,
 allocator: Allocator,
+mouse_mode: Config.Mouse = .capture,
+scroll_offset: usize = 0,
 
 /// Initialize a Pane in place at `self`.
 /// Uses in-place init to avoid a dangling pointer: VtParser stores a
@@ -45,7 +48,7 @@ pub fn initFromCommand(self: *Pane, allocator: Allocator, command: []const []con
 
     self.* = .{
         .pty = pty,
-        .screen = try Screen.init(allocator, rect.width, rect.height),
+        .screen = try Screen.initWithScrollback(allocator, rect.width, rect.height, 1000),
         .parser = undefined,
         .rect = rect,
         .allocator = allocator,
@@ -65,13 +68,22 @@ pub fn feedOutput(self: *Pane, data: []const u8) void {
     self.parser.feed(data);
 }
 
+pub fn scrollViewUp(self: *Pane, n: usize) void {
+    self.scroll_offset = @min(self.scroll_offset + n, self.screen.scrollbackLen());
+}
+
+pub fn scrollViewDown(self: *Pane, n: usize) void {
+    self.scroll_offset -|= n;
+}
+
 pub fn resize(self: *Pane, new_rect: Layout.Rect) !void {
     self.rect = new_rect;
     // Reallocate screen if dimensions changed
     if (new_rect.width != self.screen.width or new_rect.height != self.screen.height) {
         self.screen.deinit();
-        self.screen = try Screen.init(self.allocator, new_rect.width, new_rect.height);
+        self.screen = try Screen.initWithScrollback(self.allocator, new_rect.width, new_rect.height, 1000);
         self.parser = VtParser.init(&self.screen);
+        self.scroll_offset = 0;
         const size = Terminal.Size{ .cols = new_rect.width, .rows = new_rect.height };
         try self.pty.setSize(size);
     }
@@ -89,4 +101,32 @@ test "Pane.feedOutput updates screen via VT parser" {
 
     try std.testing.expectEqual(@as(u21, 'H'), screen.cellAt(0, 0).char);
     try std.testing.expectEqual(@as(u21, 'i'), screen.cellAt(0, 1).char);
+}
+
+test "scrollViewUp increases offset clamped to scrollbackLen" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+
+    // Push 2 lines into scrollback
+    for ("AAA") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("BBB") |c| screen.writeChar(c);
+    screen.scrollUp(1);
+    screen.setCursorPos(1, 0);
+    for ("CCC") |c| screen.writeChar(c);
+    screen.scrollUp(1);
+
+    // Simulate Pane scroll by testing the logic directly on screen
+    var offset: usize = 0;
+    // scrollViewUp(3) but only 2 in scrollback
+    offset = @min(offset + 3, screen.scrollbackLen());
+    try std.testing.expectEqual(@as(usize, 2), offset);
+
+    // scrollViewDown(1)
+    offset -|= 1;
+    try std.testing.expectEqual(@as(usize, 1), offset);
+
+    // scrollViewDown(5) clamps to 0
+    offset -|= 5;
+    try std.testing.expectEqual(@as(usize, 0), offset);
 }

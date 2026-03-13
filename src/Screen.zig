@@ -42,6 +42,10 @@ current_bg: Color,
 cursor_visible: bool,
 wrap_pending: bool,
 allocator: Allocator,
+scrollback: ?[][]Cell,
+scrollback_capacity: usize,
+scrollback_head: usize,
+scrollback_count: usize,
 
 pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
     const cells = try allocator.alloc(Cell, @as(usize, width) * @as(usize, height));
@@ -62,11 +66,45 @@ pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
         .cursor_visible = true,
         .wrap_pending = false,
         .allocator = allocator,
+        .scrollback = null,
+        .scrollback_capacity = 0,
+        .scrollback_head = 0,
+        .scrollback_count = 0,
     };
 }
 
+pub fn initWithScrollback(allocator: Allocator, width: u16, height: u16, capacity: usize) !Screen {
+    var screen = try Screen.init(allocator, width, height);
+    if (capacity > 0) {
+        const sb = try allocator.alloc([]Cell, capacity);
+        for (sb) |*row| {
+            row.* = try allocator.alloc(Cell, width);
+            @memset(row.*, Cell{});
+        }
+        screen.scrollback = sb;
+        screen.scrollback_capacity = capacity;
+    }
+    return screen;
+}
+
 pub fn deinit(self: *Screen) void {
+    if (self.scrollback) |sb| {
+        for (sb) |row| {
+            self.allocator.free(row);
+        }
+        self.allocator.free(sb);
+    }
     self.allocator.free(self.cells);
+}
+
+pub fn scrollbackLen(self: *const Screen) usize {
+    return self.scrollback_count;
+}
+
+pub fn scrollbackLine(self: *const Screen, index: usize) ?[]const Cell {
+    const sb = self.scrollback orelse return null;
+    if (index >= self.scrollback_count) return null;
+    return sb[(self.scrollback_head + index) % self.scrollback_capacity];
 }
 
 pub fn cellAt(self: *const Screen, row: u16, col: u16) *const Cell {
@@ -289,6 +327,30 @@ pub fn scrollUp(self: *Screen, n: u16) void {
     const w: usize = self.width;
     const top: usize = self.scroll_top;
     const bottom: usize = self.scroll_bottom;
+
+    // Save lines pushed off screen into scrollback buffer.
+    // Only when scrolling the full screen (scroll_top == 0),
+    // not within a scroll region set by the application.
+    if (self.scrollback) |sb| {
+        if (self.scroll_top == 0) {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const sb_idx = if (self.scrollback_count < self.scrollback_capacity)
+                    self.scrollback_count
+                else
+                    (self.scrollback_head + self.scrollback_count) % self.scrollback_capacity;
+
+                const src_start = (top + i) * w;
+                @memcpy(sb[sb_idx], self.cells[src_start .. src_start + w]);
+
+                if (self.scrollback_count < self.scrollback_capacity) {
+                    self.scrollback_count += 1;
+                } else {
+                    self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_capacity;
+                }
+            }
+        }
+    }
 
     if (count > 0 and top + count <= bottom + 1) {
         const dst_start = top * w;
@@ -555,4 +617,130 @@ test "Screen init creates blank grid" {
     try std.testing.expectEqual(@as(u16, 0), screen.cursor_col);
     try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 0).char);
     try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(23, 79).char);
+}
+
+// --- Scrollback buffer tests ---
+
+test "initWithScrollback creates screen with empty scrollback" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 10, 5, 100);
+    defer screen.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), screen.scrollbackLen());
+    try std.testing.expect(screen.scrollback != null);
+    try std.testing.expectEqual(@as(usize, 100), screen.scrollback_capacity);
+}
+
+test "Screen.init has no scrollback (backward compat)" {
+    var screen = try Screen.init(std.testing.allocator, 10, 5);
+    defer screen.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), screen.scrollbackLen());
+    try std.testing.expect(screen.scrollback == null);
+}
+
+test "scrollUp saves pushed line to scrollback" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+
+    // Write "ABC" on row 0, "DEF" on row 1
+    for ("ABC") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("DEF") |c| screen.writeChar(c);
+
+    // Scroll up 1 — row 0 ("ABC") should be saved to scrollback
+    screen.scrollUp(1);
+
+    try std.testing.expectEqual(@as(usize, 1), screen.scrollbackLen());
+    const line = screen.scrollbackLine(0).?;
+    try std.testing.expectEqual(@as(u21, 'A'), line[0].char);
+    try std.testing.expectEqual(@as(u21, 'B'), line[1].char);
+    try std.testing.expectEqual(@as(u21, 'C'), line[2].char);
+}
+
+test "scroll region scroll does not save to scrollback" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 5, 10);
+    defer screen.deinit();
+
+    for ("AAABBBCCCDDDEEE") |c| screen.writeChar(c);
+    screen.setScrollRegion(1, 3);
+    screen.scrollUp(1);
+
+    try std.testing.expectEqual(@as(usize, 0), screen.scrollbackLen());
+}
+
+test "scrollback wraps around when capacity exceeded" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 3);
+    defer screen.deinit();
+
+    // Push 5 lines through a 2-row screen with capacity=3
+    // Lines: "111", "222", "333", "444", "555"
+    // After all scrolls, scrollback should have last 3: "333", "444", "555"
+
+    for ("111") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("222") |c| screen.writeChar(c);
+    screen.scrollUp(1); // saves "111", screen now: "222", blank
+
+    screen.setCursorPos(1, 0);
+    for ("333") |c| screen.writeChar(c);
+    screen.scrollUp(1); // saves "222", screen now: "333", blank
+
+    screen.setCursorPos(1, 0);
+    for ("444") |c| screen.writeChar(c);
+    screen.scrollUp(1); // saves "333", screen now: "444", blank (count=3, full)
+
+    screen.setCursorPos(1, 0);
+    for ("555") |c| screen.writeChar(c);
+    screen.scrollUp(1); // saves "444", wraps, overwrites "111"
+
+    screen.setCursorPos(1, 0);
+    for ("666") |c| screen.writeChar(c);
+    screen.scrollUp(1); // saves "555", wraps, overwrites "222"
+
+    try std.testing.expectEqual(@as(usize, 3), screen.scrollbackLen());
+
+    // Oldest should be "333"
+    const line0 = screen.scrollbackLine(0).?;
+    try std.testing.expectEqual(@as(u21, '3'), line0[0].char);
+
+    // Middle should be "444"
+    const line1 = screen.scrollbackLine(1).?;
+    try std.testing.expectEqual(@as(u21, '4'), line1[0].char);
+
+    // Newest should be "555"
+    const line2 = screen.scrollbackLine(2).?;
+    try std.testing.expectEqual(@as(u21, '5'), line2[0].char);
+}
+
+test "scrollback preserves cell styles" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+
+    screen.current_fg = .{ .indexed = 1 };
+    screen.current_style.bold = true;
+    for ("ABC") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    screen.resetAttributes();
+    for ("DEF") |c| screen.writeChar(c);
+
+    screen.scrollUp(1);
+
+    const line = screen.scrollbackLine(0).?;
+    try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, line[0].fg);
+    try std.testing.expect(line[0].style.bold);
+}
+
+test "scrollbackLine returns null for out-of-range index" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+
+    try std.testing.expect(screen.scrollbackLine(0) == null);
+
+    for ("ABC") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("DEF") |c| screen.writeChar(c);
+    screen.scrollUp(1);
+
+    try std.testing.expect(screen.scrollbackLine(0) != null);
+    try std.testing.expect(screen.scrollbackLine(1) == null);
 }

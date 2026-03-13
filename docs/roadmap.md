@@ -88,11 +88,11 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Mouse-driven pane interaction — click to focus, drag to resize, scroll for history.
 
-- [ ] Click on pane to focus
-- [ ] Mouse drag on border to resize panes (adjust ratios)
-- [ ] Mouse wheel scrollback for non-passthrough panes
-- [ ] Per-pane `.mouse = .passthrough` — forward all mouse events to PTY
-- [ ] Horizontal scroll support for non-passthrough panes
+- [x] Click on pane to focus
+- [x] Mouse drag on border to resize panes (adjust ratios)
+- [x] Mouse wheel scrollback for non-passthrough panes
+- [x] Per-pane `.mouse = .passthrough` — forward all mouse events to PTY
+- [x] Horizontal scroll support for non-passthrough panes
 
 **Exit criteria:** Can click to switch panes, drag borders to resize, scroll through output history. Panes with `.mouse = .passthrough` correctly forward mouse events to programs like nvim.
 
@@ -102,11 +102,11 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Per-pane scrollback history for non-passthrough panes.
 
-- [ ] Ring buffer for scrollback lines (configurable max size)
-- [ ] Mouse wheel scroll navigates history
-- [ ] Scroll position indicator (e.g. "[42/1000]" or visual scrollbar)
-- [ ] Auto-scroll to bottom on new output (when already at bottom)
-- [ ] Horizontal scroll for wide output
+- [x] Ring buffer for scrollback lines (configurable max size)
+- [x] Mouse wheel scroll navigates history
+- [x] Scroll position indicator (e.g. "[42/1000]" or visual scrollbar)
+- [x] Auto-scroll to bottom on new output (when already at bottom)
+- [x] Horizontal scroll for wide output
 
 **Exit criteria:** `npm run dev` output is scrollable. Scrolling up pauses auto-follow. New output snaps back to bottom when already at bottom.
 

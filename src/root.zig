@@ -10,6 +10,7 @@ pub const Screen = @import("Screen.zig");
 pub const VtParser = @import("VtParser.zig");
 pub const Renderer = @import("Renderer.zig");
 pub const Pane = @import("Pane.zig");
+pub const MouseParser = @import("MouseParser.zig");
 
 test {
     std.testing.refAllDecls(@This());

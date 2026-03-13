@@ -70,13 +70,27 @@ pub const InputHandler = struct {
                 return .{ .forward = byte };
             },
             .command_csi => {
-                self.state = .normal;
                 return switch (byte) {
-                    'A' => .focus_up,
-                    'B' => .focus_down,
-                    'C' => .focus_right,
-                    'D' => .focus_left,
-                    else => .none,
+                    'A' => {
+                        self.state = .command;
+                        return .focus_up;
+                    },
+                    'B' => {
+                        self.state = .command;
+                        return .focus_down;
+                    },
+                    'C' => {
+                        self.state = .command;
+                        return .focus_right;
+                    },
+                    'D' => {
+                        self.state = .command;
+                        return .focus_left;
+                    },
+                    else => {
+                        self.state = .normal;
+                        return .none;
+                    },
                 };
             },
         }
@@ -133,41 +147,76 @@ test "full quit sequence: Ctrl+S then Ctrl+Q" {
     try std.testing.expectEqual(Action.quit, quit);
 }
 
-test "command mode: arrow up switches focus up" {
+test "command mode: arrow up switches focus up and stays in command mode" {
     var handler = InputHandler{ .state = .command };
 
     // Arrow up = ESC [ A
     try std.testing.expectEqual(Action.none, handler.feed(0x1B));
     try std.testing.expectEqual(Action.none, handler.feed('['));
     try std.testing.expectEqual(Action.focus_up, handler.feed('A'));
-    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
 }
 
-test "command mode: arrow down switches focus down" {
+test "command mode: arrow down switches focus down and stays in command mode" {
     var handler = InputHandler{ .state = .command };
 
     try std.testing.expectEqual(Action.none, handler.feed(0x1B));
     try std.testing.expectEqual(Action.none, handler.feed('['));
     try std.testing.expectEqual(Action.focus_down, handler.feed('B'));
-    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
 }
 
-test "command mode: arrow right switches focus right" {
+test "command mode: arrow right switches focus right and stays in command mode" {
     var handler = InputHandler{ .state = .command };
 
     try std.testing.expectEqual(Action.none, handler.feed(0x1B));
     try std.testing.expectEqual(Action.none, handler.feed('['));
     try std.testing.expectEqual(Action.focus_right, handler.feed('C'));
-    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
 }
 
-test "command mode: arrow left switches focus left" {
+test "command mode: arrow left switches focus left and stays in command mode" {
     var handler = InputHandler{ .state = .command };
 
     try std.testing.expectEqual(Action.none, handler.feed(0x1B));
     try std.testing.expectEqual(Action.none, handler.feed('['));
     try std.testing.expectEqual(Action.focus_left, handler.feed('D'));
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
+}
+
+test "command mode: multiple arrow keys work without re-entering command mode" {
+    var handler = InputHandler{};
+
+    // Enter command mode
+    try std.testing.expectEqual(Action.none, handler.feed(0x13));
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
+
+    // First arrow: right
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_right, handler.feed('C'));
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
+
+    // Second arrow: down (no Ctrl+S needed)
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    try std.testing.expectEqual(Action.focus_down, handler.feed('B'));
+    try std.testing.expectEqual(InputHandler.State.command, handler.state);
+
+    // Non-arrow key exits command mode
+    const action = handler.feed('x');
+    try std.testing.expectEqual(Action{ .forward = 'x' }, action);
     try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+}
+
+test "command mode: unknown CSI exits command mode" {
+    var handler = InputHandler{ .state = .command };
+
+    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
+    try std.testing.expectEqual(Action.none, handler.feed('['));
+    const action = handler.feed('Z');
+    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
+    try std.testing.expectEqual(Action.none, action);
 }
 
 test "command mode: incomplete escape returns to normal" {
@@ -178,16 +227,6 @@ test "command mode: incomplete escape returns to normal" {
     const action = handler.feed('x');
     try std.testing.expectEqual(InputHandler.State.normal, handler.state);
     try std.testing.expectEqual(Action{ .forward = 'x' }, action);
-}
-
-test "command mode: unknown CSI final byte exits command mode" {
-    var handler = InputHandler{ .state = .command };
-
-    try std.testing.expectEqual(Action.none, handler.feed(0x1B));
-    try std.testing.expectEqual(Action.none, handler.feed('['));
-    const action = handler.feed('Z'); // unknown
-    try std.testing.expectEqual(InputHandler.State.normal, handler.state);
-    try std.testing.expectEqual(Action.none, action);
 }
 
 test "custom prefix key: Ctrl+B enters command mode" {

@@ -142,6 +142,56 @@ fn overlapsVertically(a: Rect, b: Rect) bool {
         @as(i32, b.row) < @as(i32, a.row) + @as(i32, a.height);
 }
 
+/// Find which pane contains the given (row, col) coordinate.
+/// Returns the pane index, or null if the coordinate is on a border or outside all panes.
+pub fn paneAt(rects: []const Rect, row: u16, col: u16) ?usize {
+    for (rects, 0..) |r, i| {
+        if (col >= r.col and col < @as(u16, r.col) + @as(u16, r.width) and
+            row >= r.row and row < @as(u16, r.row) + @as(u16, r.height))
+        {
+            return i;
+        }
+    }
+    return null;
+}
+
+pub const BorderInfo = struct {
+    /// Index of the pane to the left (vertical) or above (horizontal) the border.
+    pane_before: usize,
+    /// Index of the pane to the right (vertical) or below (horizontal) the border.
+    pane_after: usize,
+    /// True for vertical border (between horizontally split panes).
+    is_vertical: bool,
+};
+
+/// Find the border at the given (row, col) coordinate and identify the adjacent panes.
+/// Returns null if the coordinate is inside a pane, outside all panes, or at a junction
+/// where adjacent cells are also borders.
+pub fn borderAt(rects: []const Rect, row: u16, col: u16) ?BorderInfo {
+    // Not a border if it's inside a pane
+    if (paneAt(rects, row, col) != null) return null;
+
+    // Check for vertical border: pane to the left and right
+    if (col > 0) {
+        const left = paneAt(rects, row, col - 1);
+        const right = paneAt(rects, row, col + 1);
+        if (left != null and right != null and left.? != right.?) {
+            return .{ .pane_before = left.?, .pane_after = right.?, .is_vertical = true };
+        }
+    }
+
+    // Check for horizontal border: pane above and below
+    if (row > 0) {
+        const above = paneAt(rects, row - 1, col);
+        const below = paneAt(rects, row + 1, col);
+        if (above != null and below != null and above.? != below.?) {
+            return .{ .pane_before = above.?, .pane_after = below.?, .is_vertical = false };
+        }
+    }
+
+    return null;
+}
+
 fn overlapsHorizontally(a: Rect, b: Rect) bool {
     return @as(i32, a.col) < @as(i32, b.col) + @as(i32, b.width) and
         @as(i32, b.col) < @as(i32, a.col) + @as(i32, a.width);
@@ -399,6 +449,109 @@ test "findNeighbor in 3-pane L-shape layout" {
     try std.testing.expectEqual(@as(?usize, 2), findNeighbor(rects, 1, .down));
     // From bottom-right, up → pane 1
     try std.testing.expectEqual(@as(?usize, 1), findNeighbor(rects, 2, .up));
+}
+
+// --- paneAt tests ---
+
+test "paneAt returns pane index for click inside pane 0" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, 0), paneAt(rects, 10, 20));
+}
+
+test "paneAt returns pane index for click inside pane 1" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), paneAt(rects, 10, 50));
+}
+
+test "paneAt returns null for click on border" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?usize, null), paneAt(rects, 10, 40));
+}
+
+test "paneAt returns correct pane in 3-pane layout" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 11 },
+        .{ .col = 41, .row = 12, .width = 40, .height = 12 },
+    };
+    // Click in bottom-right pane
+    try std.testing.expectEqual(@as(?usize, 2), paneAt(rects, 15, 50));
+    // Click in top-right pane
+    try std.testing.expectEqual(@as(?usize, 1), paneAt(rects, 5, 50));
+}
+
+test "paneAt returns null for coordinates outside all panes" {
+    const rects = &[_]Rect{
+        .{ .col = 5, .row = 5, .width = 10, .height = 10 },
+    };
+    try std.testing.expectEqual(@as(?usize, null), paneAt(rects, 0, 0));
+}
+
+// --- borderAt tests ---
+
+test "borderAt returns vertical border info between 2 horizontal panes" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    const info = borderAt(rects, 10, 40);
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 0), info.?.pane_before);
+    try std.testing.expectEqual(@as(usize, 1), info.?.pane_after);
+    try std.testing.expect(info.?.is_vertical);
+}
+
+test "borderAt returns horizontal border info between 2 vertical panes" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 80, .height = 11 },
+        .{ .col = 0, .row = 12, .width = 80, .height = 12 },
+    };
+    const info = borderAt(rects, 11, 40);
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 0), info.?.pane_before);
+    try std.testing.expectEqual(@as(usize, 1), info.?.pane_after);
+    try std.testing.expect(!info.?.is_vertical);
+}
+
+test "borderAt returns null for coordinate inside a pane" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    try std.testing.expectEqual(@as(?BorderInfo, null), borderAt(rects, 10, 20));
+}
+
+test "borderAt returns null for junction cell in L-shape layout" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 11 },
+        .{ .col = 41, .row = 12, .width = 40, .height = 12 },
+    };
+    // Junction at (11, 40) — adjacent cells on right are also on border
+    try std.testing.expectEqual(@as(?BorderInfo, null), borderAt(rects, 11, 40));
+}
+
+test "borderAt works on horizontal border in L-shape layout" {
+    const rects = &[_]Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 11 },
+        .{ .col = 41, .row = 12, .width = 40, .height = 12 },
+    };
+    // Horizontal border between pane 1 and 2 at (11, 50)
+    const info = borderAt(rects, 11, 50);
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 1), info.?.pane_before);
+    try std.testing.expectEqual(@as(usize, 2), info.?.pane_after);
+    try std.testing.expect(!info.?.is_vertical);
 }
 
 test "mixed percent, fixed, and equal sizing" {

@@ -218,6 +218,88 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
     last_style = .{};
 }
 
+const empty_cell = Screen.Cell{};
+
+pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect, scroll_offset: usize) !void {
+    _ = self;
+    var last_fg: Screen.Color = .default;
+    var last_bg: Screen.Color = .default;
+    var last_style: Screen.Style = .{};
+
+    const sb_count = screen.scrollbackLen();
+
+    var row: u16 = 0;
+    while (row < screen.height) : (row += 1) {
+        try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+            @as(u32, rect.row) + @as(u32, row) + 1,
+            @as(u32, rect.col) + 1,
+        });
+
+        // Unified line model:
+        // total_lines = sb_count + screen.height
+        // For visual row R, the unified index is:
+        //   (sb_count + screen.height) - scroll_offset - screen.height + row
+        //   = sb_count - scroll_offset + row
+        const unified: i64 = @as(i64, @intCast(sb_count)) - @as(i64, @intCast(scroll_offset)) + @as(i64, row);
+
+        var col: u16 = 0;
+        while (col < screen.width) : (col += 1) {
+            const cell: *const Screen.Cell = blk: {
+                if (unified < 0) {
+                    break :blk &empty_cell;
+                }
+                const u_idx: usize = @intCast(unified);
+                if (u_idx < sb_count) {
+                    // Reading from scrollback
+                    if (screen.scrollbackLine(u_idx)) |line| {
+                        break :blk &line[col];
+                    }
+                    break :blk &empty_cell;
+                } else {
+                    // Reading from live screen
+                    const screen_row: u16 = @intCast(u_idx - sb_count);
+                    break :blk screen.cellAt(screen_row, col);
+                }
+            };
+
+            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style))
+            {
+                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+            }
+
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
+            try writer.writeAll(buf[0..len]);
+        }
+    }
+
+    // Scroll indicator overlay
+    if (scroll_offset > 0) {
+        var indicator_buf: [20]u8 = undefined;
+        const indicator = std.fmt.bufPrint(&indicator_buf, "[{d}/{d}]", .{
+            scroll_offset, sb_count,
+        }) catch "";
+        if (indicator.len > 0 and indicator.len <= screen.width) {
+            const indicator_col = @as(u32, rect.col) + @as(u32, screen.width) - @as(u32, @intCast(indicator.len));
+            try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+                @as(u32, rect.row) + 1,
+                indicator_col + 1,
+            });
+            try writer.writeAll("\x1b[0;7m"); // inverse for visibility
+            try writer.writeAll(indicator);
+            last_fg = .default;
+            last_bg = .default;
+            last_style = .{};
+        }
+    }
+
+    try writer.writeAll("\x1b[0m");
+    last_fg = .default;
+    last_bg = .default;
+    last_style = .{};
+}
+
 pub fn renderBorders(self: *const Renderer, writer: anytype) !void {
     const w: usize = self.width;
     const h: usize = self.height;
@@ -283,6 +365,39 @@ pub fn renderFrame(
         // Show cursor if active pane has it visible
         if (screen.cursor_visible) {
             try writer.writeAll("\x1b[?25h");
+        }
+    }
+}
+
+pub fn renderFrameWithScrollback(
+    self: *const Renderer,
+    writer: anytype,
+    screens: []const *const Screen,
+    rects: []const Layout.Rect,
+    scroll_offsets: []const usize,
+    active_pane: usize,
+) !void {
+    try writer.writeAll("\x1b[?25l");
+
+    for (screens, rects, scroll_offsets) |screen, rect, offset| {
+        try self.renderPaneWithOffset(writer, screen, rect, offset);
+    }
+
+    try self.renderBorders(writer);
+
+    // Show cursor only if active pane is at bottom (offset=0)
+    if (active_pane < screens.len) {
+        const screen = screens[active_pane];
+        const rect = rects[active_pane];
+        const offset = scroll_offsets[active_pane];
+        if (offset == 0) {
+            try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+                @as(u32, rect.row) + @as(u32, screen.cursor_row) + 1,
+                @as(u32, rect.col) + @as(u32, screen.cursor_col) + 1,
+            });
+            if (screen.cursor_visible) {
+                try writer.writeAll("\x1b[?25h");
+            }
         }
     }
 }
@@ -535,4 +650,97 @@ test "full render hides cursor at start" {
 
     // Starts with hide cursor
     try std.testing.expect(std.mem.startsWith(u8, output, "\x1b[?25l"));
+}
+
+// --- Scrollback render tests ---
+
+test "renderPaneWithOffset offset=0 matches renderPane output" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+    var parser = @import("VtParser.zig").init(&screen);
+    parser.feed("Hi!");
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 3, .height = 2 };
+    var renderer = try Renderer.init(std.testing.allocator, 10, 10);
+    defer renderer.deinit();
+
+    var buf1: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf1.deinit(std.testing.allocator);
+    try renderer.renderPane(buf1.writer(std.testing.allocator), &screen, rect);
+
+    var buf2: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf2.deinit(std.testing.allocator);
+    try renderer.renderPaneWithOffset(buf2.writer(std.testing.allocator), &screen, rect, 0);
+
+    try std.testing.expectEqualStrings(buf1.items, buf2.items);
+}
+
+test "renderPaneWithOffset shows scrollback lines when offset > 0" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 3, 2, 10);
+    defer screen.deinit();
+
+    // Write "AAA" on row 0, "BBB" on row 1
+    for ("AAA") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("BBB") |c| screen.writeChar(c);
+    // Scroll up — "AAA" goes to scrollback, screen now: "BBB", blank
+    screen.scrollUp(1);
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 3, .height = 2 };
+    var renderer = try Renderer.init(std.testing.allocator, 10, 10);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1);
+    const output = buf.items;
+
+    // With offset=1, row 0 should show scrollback line "AAA"
+    try std.testing.expect(std.mem.indexOf(u8, output, "AAA") != null);
+    // Row 1 should show screen row 0 which is "BBB"
+    try std.testing.expect(std.mem.indexOf(u8, output, "BBB") != null);
+}
+
+test "scroll indicator shown when offset > 0" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 10, 2, 10);
+    defer screen.deinit();
+
+    for ("AAAAAAAAAA") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("BBBBBBBBBB") |c| screen.writeChar(c);
+    screen.scrollUp(1);
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 10, .height = 2 };
+    var renderer = try Renderer.init(std.testing.allocator, 20, 10);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1);
+    const output = buf.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "[1/1]") != null);
+}
+
+test "no scroll indicator when offset = 0" {
+    var screen = try Screen.initWithScrollback(std.testing.allocator, 10, 2, 10);
+    defer screen.deinit();
+
+    for ("AAAAAAAAAA") |c| screen.writeChar(c);
+    screen.setCursorPos(1, 0);
+    for ("BBBBBBBBBB") |c| screen.writeChar(c);
+    screen.scrollUp(1);
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 10, .height = 2 };
+    var renderer = try Renderer.init(std.testing.allocator, 20, 10);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0);
+    const output = buf.items;
+
+    // Scroll indicator format is "[N/M]" — should not appear at offset=0
+    try std.testing.expect(std.mem.indexOf(u8, output, "[0/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[0;7m") == null);
 }

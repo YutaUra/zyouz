@@ -7,6 +7,7 @@ const Pane = @import("Pane.zig");
 const Renderer = @import("Renderer.zig");
 const Layout = @import("Layout.zig");
 const Config = @import("Config.zig");
+const MouseParser = @import("MouseParser.zig");
 
 /// Signal pipe for SIGWINCH notification.
 /// Written from signal handler, read from event loop.
@@ -118,7 +119,13 @@ pub fn runMultiPane(
         posix.close(signal_pipe[1]);
     }
 
+    // Enable mouse tracking (SGR mode for extended coordinates)
+    try terminal.enableMouseTracking();
+    defer terminal.disableMouseTracking() catch {};
+
     var handler = input.InputHandler.initWithPrefix(prefix_key);
+    var mouse_parser = MouseParser{};
+    var drag_state: ?DragState = null;
     var buf: [4096]u8 = undefined;
 
     // Initial render
@@ -208,25 +215,43 @@ pub fn runMultiPane(
             const n = terminal.readInput(&buf) catch continue;
             if (active_pane.* < panes.len) {
                 for (buf[0..n]) |byte| {
-                    const prev_state = handler.state;
-                    switch (handler.feed(byte)) {
-                        .forward => |b| {
-                            _ = try panes[active_pane.*].pty.writeInput(&.{b});
+                    // Mouse parser intercepts SGR mouse sequences before
+                    // they reach the keyboard input handler.
+                    switch (mouse_parser.feed(byte)) {
+                        .passthrough => |b| {
+                            processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
                         },
-                        .quit => return,
-                        .focus_up => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .up),
-                        .focus_down => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .down),
-                        .focus_left => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .left),
-                        .focus_right => handleFocus(rects, active_pane, renderer, &handler, &needs_render, .right),
-                        .none => {},
-                    }
-                    // Recompute borders when entering/leaving command mode
-                    // to show visual indicator.
-                    if (handler.state != prev_state and
-                        (handler.state == .command or prev_state == .command))
-                    {
-                        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
-                        needs_render = true;
+                        .consumed => {},
+                        .event => |ev| {
+                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render);
+                        },
+                        .escape_passthrough => |b| {
+                            processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
+                            processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
+                        },
+                        .csi_passthrough => |b| {
+                            processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
+                            processKeyByte('[', &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
+                            processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
+                                error.Quit => return,
+                                else => return err,
+                            };
+                        },
                     }
                 }
             }
@@ -236,6 +261,212 @@ pub fn runMultiPane(
             try renderAll(terminal, renderer, panes, rects, active_pane.*);
         }
     }
+}
+
+fn processKeyByte(
+    byte: u8,
+    handler: *input.InputHandler,
+    panes: []Pane,
+    rects: []const Layout.Rect,
+    active_pane: *usize,
+    renderer: *Renderer,
+    needs_render: *bool,
+) !void {
+    const prev_state = handler.state;
+    switch (handler.feed(byte)) {
+        .forward => |b| {
+            if (active_pane.* < panes.len) {
+                _ = try panes[active_pane.*].pty.writeInput(&.{b});
+            }
+        },
+        .quit => return error.Quit,
+        .focus_up => handleFocus(rects, active_pane, renderer, handler, needs_render, .up),
+        .focus_down => handleFocus(rects, active_pane, renderer, handler, needs_render, .down),
+        .focus_left => handleFocus(rects, active_pane, renderer, handler, needs_render, .left),
+        .focus_right => handleFocus(rects, active_pane, renderer, handler, needs_render, .right),
+        .none => {},
+    }
+    if (handler.state != prev_state and
+        (handler.state == .command or prev_state == .command))
+    {
+        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+        needs_render.* = true;
+    }
+}
+
+const DragState = struct {
+    border: Layout.BorderInfo,
+    last_col: u16,
+    last_row: u16,
+};
+
+const min_pane_size: u16 = 2;
+
+fn handleMouseEvent(
+    ev: MouseParser.MouseEvent,
+    panes: []Pane,
+    rects: []Layout.Rect,
+    active_pane: *usize,
+    renderer: *Renderer,
+    handler: *const input.InputHandler,
+    drag_state: *?DragState,
+    needs_render: *bool,
+) void {
+    switch (ev.kind) {
+        .press => {
+            if (ev.button == .scroll_up or ev.button == .scroll_down or
+                ev.button == .scroll_left or ev.button == .scroll_right)
+            {
+                if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                    if (panes[target_pane].mouse_mode == .passthrough) {
+                        var sgr_buf: [32]u8 = undefined;
+                        const sgr = ev.formatSgr(&sgr_buf, rects[target_pane].col, rects[target_pane].row);
+                        if (sgr.len > 0) {
+                            _ = panes[target_pane].pty.writeInput(sgr) catch {};
+                        }
+                    } else {
+                        // Horizontal scroll: no-op for non-passthrough
+                        // (content wraps at screen width)
+                        if (ev.button == .scroll_up) {
+                            panes[target_pane].scrollViewUp(3);
+                        } else if (ev.button == .scroll_down) {
+                            panes[target_pane].scrollViewDown(3);
+                        }
+                        needs_render.* = true;
+                    }
+                }
+                return;
+            }
+            if (ev.button == .left) {
+                // Check if clicking on a border to start drag
+                if (Layout.borderAt(rects, ev.row, ev.col)) |border| {
+                    drag_state.* = .{
+                        .border = border,
+                        .last_col = ev.col,
+                        .last_row = ev.row,
+                    };
+                    return;
+                }
+                // Click on pane to focus
+                if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                    if (panes[target_pane].mouse_mode == .passthrough) {
+                        var sgr_buf: [32]u8 = undefined;
+                        const sgr = ev.formatSgr(&sgr_buf, rects[target_pane].col, rects[target_pane].row);
+                        if (sgr.len > 0) {
+                            _ = panes[target_pane].pty.writeInput(sgr) catch {};
+                        }
+                    }
+                    if (target_pane != active_pane.*) {
+                        active_pane.* = target_pane;
+                        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+                        needs_render.* = true;
+                    }
+                }
+            }
+        },
+        .drag => {
+            if (ev.button == .left) {
+                if (drag_state.*) |*ds| {
+                    applyDrag(ds, ev, panes, rects, renderer, active_pane, handler, needs_render);
+                } else {
+                    // Drag on a passthrough pane → forward
+                    if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                        if (panes[target_pane].mouse_mode == .passthrough) {
+                            var sgr_buf: [32]u8 = undefined;
+                            const sgr = ev.formatSgr(&sgr_buf, rects[target_pane].col, rects[target_pane].row);
+                            if (sgr.len > 0) {
+                                _ = panes[target_pane].pty.writeInput(sgr) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        .release => {
+            drag_state.* = null;
+            // Forward release to passthrough panes
+            if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                if (panes[target_pane].mouse_mode == .passthrough) {
+                    var sgr_buf: [32]u8 = undefined;
+                    const sgr = ev.formatSgr(&sgr_buf, rects[target_pane].col, rects[target_pane].row);
+                    if (sgr.len > 0) {
+                        _ = panes[target_pane].pty.writeInput(sgr) catch {};
+                    }
+                }
+            }
+        },
+    }
+}
+
+fn applyDrag(
+    ds: *DragState,
+    ev: MouseParser.MouseEvent,
+    panes: []Pane,
+    rects: []Layout.Rect,
+    renderer: *Renderer,
+    active_pane: *const usize,
+    handler: *const input.InputHandler,
+    needs_render: *bool,
+) void {
+    if (ds.border.is_vertical) {
+        const delta: i32 = @as(i32, ev.col) - @as(i32, ds.last_col);
+        if (delta == 0) return;
+
+        // Current border column: right edge of the "before" reference pane.
+        const border_col: u16 = rects[ds.border.pane_before].col + rects[ds.border.pane_before].width;
+
+        // Check all panes sharing this border can accommodate the resize.
+        for (rects) |r| {
+            if (r.col + r.width == border_col) {
+                if (@as(i32, r.width) + delta < min_pane_size) return;
+            } else if (r.col == border_col + 1) {
+                if (@as(i32, r.width) - delta < min_pane_size) return;
+            }
+        }
+
+        // Apply to ALL panes sharing the border.
+        for (rects, 0..) |*r, i| {
+            if (r.col + r.width == border_col) {
+                r.width = @intCast(@as(i32, r.width) + delta);
+                panes[i].resize(r.*) catch {};
+            } else if (r.col == border_col + 1) {
+                r.col = @intCast(@as(i32, r.col) + delta);
+                r.width = @intCast(@as(i32, r.width) - delta);
+                panes[i].resize(r.*) catch {};
+            }
+        }
+    } else {
+        const delta: i32 = @as(i32, ev.row) - @as(i32, ds.last_row);
+        if (delta == 0) return;
+
+        // Current border row: bottom edge of the "before" reference pane.
+        const border_row: u16 = rects[ds.border.pane_before].row + rects[ds.border.pane_before].height;
+
+        for (rects) |r| {
+            if (r.row + r.height == border_row) {
+                if (@as(i32, r.height) + delta < min_pane_size) return;
+            } else if (r.row == border_row + 1) {
+                if (@as(i32, r.height) - delta < min_pane_size) return;
+            }
+        }
+
+        for (rects, 0..) |*r, i| {
+            if (r.row + r.height == border_row) {
+                r.height = @intCast(@as(i32, r.height) + delta);
+                panes[i].resize(r.*) catch {};
+            } else if (r.row == border_row + 1) {
+                r.row = @intCast(@as(i32, r.row) + delta);
+                r.height = @intCast(@as(i32, r.height) - delta);
+                panes[i].resize(r.*) catch {};
+            }
+        }
+    }
+
+    ds.last_col = ev.col;
+    ds.last_row = ev.row;
+
+    renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+    needs_render.* = true;
 }
 
 fn handleFocus(
@@ -260,17 +491,26 @@ fn renderAll(
     rects: []const Layout.Rect,
     active_pane: usize,
 ) !void {
-    // Build screen pointer array
-    var screens: [max_panes]*const @import("Screen.zig") = undefined;
+    const Screen = @import("Screen.zig");
+    // Build screen pointer and scroll offset arrays
+    var screens: [max_panes]*const Screen = undefined;
+    var scroll_offsets: [max_panes]usize = undefined;
     for (panes, 0..) |*pane, i| {
         screens[i] = &pane.screen;
+        scroll_offsets[i] = pane.scroll_offset;
     }
 
     var render_buf: [65536]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&render_buf);
     const writer = fbs.writer();
 
-    renderer.renderFrame(writer, screens[0..panes.len], rects, active_pane) catch {
+    renderer.renderFrameWithScrollback(
+        writer,
+        screens[0..panes.len],
+        rects,
+        scroll_offsets[0..panes.len],
+        active_pane,
+    ) catch {
         // Buffer overflow — render directly without buffering
         return;
     };

@@ -84,6 +84,7 @@ pub fn main() !void {
         const pane_count = @min(leaves.items.len, 32);
         for (0..pane_count) |i| {
             try panes_buf[i].initFromCommand(allocator, leaves.items[i].command, rects[i]);
+            panes_buf[i].mouse_mode = leaves.items[i].mouse;
         }
         const panes = panes_buf[0..pane_count];
         defer {

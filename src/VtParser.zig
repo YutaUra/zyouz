@@ -184,6 +184,8 @@ fn dispatchCsi(self: *VtParser, final: u8) void {
         },
         'L' => self.screen.insertLines(self.getParam(0, 1)), // IL
         'M' => self.screen.deleteLines(self.getParam(0, 1)), // DL
+        'S' => self.screen.scrollUp(self.getParam(0, 1)), // SU — Scroll Up
+        'T' => self.screen.scrollDown(self.getParam(0, 1)), // SD — Scroll Down
         'm' => self.handleSgr(), // SGR
         'r' => { // DECSTBM — Set Scrolling Region
             const top = self.getParam(0, 1);
@@ -809,4 +811,36 @@ test "OSC terminated by ST (ESC backslash)" {
     parser.feed("B");
 
     try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 0).char);
+}
+
+test "CSI S scrolls content up" {
+    var screen = try Screen.init(std.testing.allocator, 3, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AAABBBCCC");
+    parser.feed("\x1b[1S");
+
+    // Row 0 should now be "BBB" (shifted up)
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 0).char);
+    // Row 1 should now be "CCC"
+    try std.testing.expectEqual(@as(u21, 'C'), screen.cellAt(1, 0).char);
+    // Row 2 should be blank
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(2, 0).char);
+}
+
+test "CSI T scrolls content down" {
+    var screen = try Screen.init(std.testing.allocator, 3, 3);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("AAABBBCCC");
+    parser.feed("\x1b[1T");
+
+    // Row 0 should be blank (new)
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 0).char);
+    // Row 1 should now be "AAA"
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(1, 0).char);
+    // Row 2 should now be "BBB"
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(2, 0).char);
 }

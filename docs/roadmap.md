@@ -116,11 +116,11 @@ Project scaffold, dev environment, and philosophy documentation.
 
 **Goal:** Handle command exit, auto-restart, and clean shutdown.
 
-- [ ] Pane shows last output when command exits (stays as empty pane)
-- [ ] Exit status display in pane border or footer
-- [ ] `.restart = .on_failure` — auto-restart on non-zero exit
-- [ ] Ctrl+S → Ctrl+Q kills all child processes and exits
-- [ ] Graceful shutdown: SIGTERM first, SIGKILL after timeout
+- [x] Pane shows last output when command exits (stays as empty pane)
+- [x] Exit status display in pane border or footer
+- [x] `.restart = .on_failure` — auto-restart on non-zero exit
+- [x] Ctrl+S → Ctrl+Q kills all child processes and exits
+- [x] Graceful shutdown: SIGTERM first, SIGKILL after timeout
 
 **Exit criteria:** Crashed commands auto-restart per config. Exited commands leave output visible. Clean shutdown kills all children.
 

@@ -9,6 +9,11 @@ const Config = @import("Config.zig");
 
 const Pane = @This();
 
+pub const ProcessState = union(enum) {
+    running,
+    exited: u32,
+};
+
 pty: Pty.Pty,
 screen: Screen,
 parser: VtParser,
@@ -16,6 +21,9 @@ rect: Layout.Rect,
 allocator: Allocator,
 mouse_mode: Config.Mouse = .capture,
 scroll_offset: usize = 0,
+process_state: ProcessState = .running,
+command: []const []const u8 = &.{},
+restart: Config.Restart = .never,
 
 /// Initialize a Pane in place at `self`.
 /// Uses in-place init to avoid a dangling pointer: VtParser stores a
@@ -52,6 +60,7 @@ pub fn initFromCommand(self: *Pane, allocator: Allocator, command: []const []con
         .parser = undefined,
         .rect = rect,
         .allocator = allocator,
+        .command = command,
     };
     // parser.screen must point to self.screen (the final location),
     // not a temporary local variable.
@@ -74,6 +83,60 @@ pub fn scrollViewUp(self: *Pane, n: usize) void {
 
 pub fn scrollViewDown(self: *Pane, n: usize) void {
     self.scroll_offset -|= n;
+}
+
+pub fn isAlive(self: *const Pane) bool {
+    return isAliveState(self.process_state);
+}
+
+pub fn isAliveState(state: ProcessState) bool {
+    return state == .running;
+}
+
+pub fn markExited(self: *Pane, exit_code: u32) void {
+    self.process_state = .{ .exited = exit_code };
+}
+
+pub fn shouldRestart(restart: Config.Restart, exit_code: u32) bool {
+    return switch (restart) {
+        .never => false,
+        .on_failure => exit_code != 0,
+    };
+}
+
+/// Re-spawn the child process, resetting screen and parser.
+pub fn respawn(self: *Pane) !void {
+    if (self.command.len == 0) return error.NoCommand;
+
+    // Build null-terminated argv
+    const argv = try self.allocator.alloc(?[*:0]const u8, self.command.len + 1);
+    defer {
+        for (argv[0..self.command.len]) |ptr| {
+            const s: [*:0]const u8 = ptr.?;
+            var len: usize = 0;
+            while (s[len] != 0) len += 1;
+            self.allocator.free(s[0 .. len + 1]);
+        }
+        self.allocator.free(argv);
+    }
+    for (self.command, 0..) |arg, i| {
+        argv[i] = (try self.allocator.dupeZ(u8, arg)).ptr;
+    }
+    argv[self.command.len] = null;
+    const argv_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(argv.ptr);
+
+    const size = Terminal.Size{ .cols = self.rect.width, .rows = self.rect.height };
+    const new_pty = try Pty.Pty.spawn(argv_ptr, size);
+
+    // Close old PTY master fd (child already exited, no need to kill)
+    std.posix.close(self.pty.master_fd);
+
+    self.pty = new_pty;
+    self.screen.deinit();
+    self.screen = try Screen.initWithScrollback(self.allocator, self.rect.width, self.rect.height, 1000);
+    self.parser = VtParser.init(&self.screen);
+    self.scroll_offset = 0;
+    self.process_state = .running;
 }
 
 pub fn resize(self: *Pane, new_rect: Layout.Rect) !void {
@@ -129,4 +192,52 @@ test "scrollViewUp increases offset clamped to scrollbackLen" {
     // scrollViewDown(5) clamps to 0
     offset -|= 5;
     try std.testing.expectEqual(@as(usize, 0), offset);
+}
+
+test "ProcessState defaults to .running" {
+    const state = Pane.ProcessState.running;
+    try std.testing.expect(state == .running);
+}
+
+test "ProcessState.exited carries exit code" {
+    const state = Pane.ProcessState{ .exited = 42 };
+    try std.testing.expectEqual(@as(u32, 42), state.exited);
+}
+
+test "isAlive returns true for .running, false for .exited" {
+    const running = Pane.ProcessState.running;
+    const exited = Pane.ProcessState{ .exited = 0 };
+    try std.testing.expect(Pane.isAliveState(running));
+    try std.testing.expect(!Pane.isAliveState(exited));
+}
+
+test "markExited sets process_state to .exited" {
+    var screen = try Screen.init(std.testing.allocator, 3, 2);
+    defer screen.deinit();
+    var pane = Pane{
+        .pty = undefined,
+        .screen = screen,
+        .parser = undefined,
+        .rect = .{ .col = 0, .row = 0, .width = 3, .height = 2 },
+        .allocator = std.testing.allocator,
+        .process_state = .running,
+    };
+    try std.testing.expect(pane.isAlive());
+    pane.markExited(1);
+    try std.testing.expect(!pane.isAlive());
+    try std.testing.expectEqual(@as(u32, 1), pane.process_state.exited);
+}
+
+test "shouldRestart: .on_failure + non-zero exit → true" {
+    try std.testing.expect(Pane.shouldRestart(.on_failure, 1));
+}
+
+test "shouldRestart: .on_failure + zero exit → false" {
+    try std.testing.expect(!Pane.shouldRestart(.on_failure, 0));
+}
+
+test "shouldRestart: .never + any exit → false" {
+    try std.testing.expect(!Pane.shouldRestart(.never, 0));
+    try std.testing.expect(!Pane.shouldRestart(.never, 1));
+    try std.testing.expect(!Pane.shouldRestart(.never, 127));
 }

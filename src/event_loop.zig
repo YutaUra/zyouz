@@ -129,15 +129,20 @@ pub fn runMultiPane(
     var buf: [4096]u8 = undefined;
 
     // Initial render
-    renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+    recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
     try renderAll(terminal, renderer, panes, rects, active_pane.*);
 
     while (true) {
         // Build pollfd array: [terminal, pane0_pty, pane1_pty, ..., signal_pipe]
+        // Exited panes get fd=-1 so poll() ignores them.
         var fds: [max_panes + 2]posix.pollfd = undefined;
         fds[0] = .{ .fd = terminal.fd, .events = posix.POLL.IN, .revents = 0 };
         for (panes, 0..) |*pane, i| {
-            fds[i + 1] = .{ .fd = pane.pty.master_fd, .events = posix.POLL.IN, .revents = 0 };
+            fds[i + 1] = .{
+                .fd = if (pane.isAlive()) pane.pty.master_fd else -1,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            };
         }
         const sig_idx = panes.len + 1;
         fds[sig_idx] = .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 };
@@ -162,29 +167,33 @@ pub fn runMultiPane(
             // Resize panes and update rects
             for (panes, 0..) |*pane, i| {
                 if (i < new_rects.len) {
-                    try pane.resize(new_rects[i]);
                     rects[i] = new_rects[i];
+                    if (pane.isAlive()) {
+                        try pane.resize(new_rects[i]);
+                    }
                 }
             }
 
             // Resize renderer
             renderer.deinit();
             renderer.* = try Renderer.init(allocator, size.cols, size.rows);
-            renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+            recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
             needs_render = true;
         }
 
-        // Handle PTY output
-        var any_exited = false;
+        // Handle PTY output for alive panes
         for (panes, 0..) |*pane, i| {
+            if (!pane.isAlive()) continue;
             const fd_idx = i + 1;
             if (fds[fd_idx].revents & posix.POLL.IN != 0) {
                 const n = pane.pty.read(&buf) catch {
-                    any_exited = true;
+                    handlePaneExit(pane);
+                    needs_render = true;
                     continue;
                 };
                 if (n == 0) {
-                    any_exited = true;
+                    handlePaneExit(pane);
+                    needs_render = true;
                     continue;
                 }
                 pane.feedOutput(buf[0..n]);
@@ -197,17 +206,9 @@ pub fn runMultiPane(
                     if (n == 0) break;
                     pane.feedOutput(buf[0..n]);
                 }
-                any_exited = true;
+                handlePaneExit(pane);
                 needs_render = true;
             }
-        }
-
-        if (any_exited) {
-            // For now, exit if any pane exits
-            if (needs_render) {
-                try renderAll(terminal, renderer, panes, rects, active_pane.*);
-            }
-            break;
         }
 
         // Handle terminal input → active pane
@@ -220,7 +221,10 @@ pub fn runMultiPane(
                     switch (mouse_parser.feed(byte)) {
                         .passthrough => |b| {
                             processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                         },
@@ -230,25 +234,40 @@ pub fn runMultiPane(
                         },
                         .escape_passthrough => |b| {
                             processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                             processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                         },
                         .csi_passthrough => |b| {
                             processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                             processKeyByte('[', &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                             processKeyByte(b, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
-                                error.Quit => return,
+                                error.Quit => {
+                                    gracefulShutdown(panes);
+                                    return;
+                                },
                                 else => return err,
                             };
                         },
@@ -275,21 +294,21 @@ fn processKeyByte(
     const prev_state = handler.state;
     switch (handler.feed(byte)) {
         .forward => |b| {
-            if (active_pane.* < panes.len) {
+            if (active_pane.* < panes.len and panes[active_pane.*].isAlive()) {
                 _ = try panes[active_pane.*].pty.writeInput(&.{b});
             }
         },
         .quit => return error.Quit,
-        .focus_up => handleFocus(rects, active_pane, renderer, handler, needs_render, .up),
-        .focus_down => handleFocus(rects, active_pane, renderer, handler, needs_render, .down),
-        .focus_left => handleFocus(rects, active_pane, renderer, handler, needs_render, .left),
-        .focus_right => handleFocus(rects, active_pane, renderer, handler, needs_render, .right),
+        .focus_up => handleFocus(rects, active_pane, renderer, handler, needs_render, .up, panes),
+        .focus_down => handleFocus(rects, active_pane, renderer, handler, needs_render, .down, panes),
+        .focus_left => handleFocus(rects, active_pane, renderer, handler, needs_render, .left, panes),
+        .focus_right => handleFocus(rects, active_pane, renderer, handler, needs_render, .right, panes),
         .none => {},
     }
     if (handler.state != prev_state and
         (handler.state == .command or prev_state == .command))
     {
-        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+        recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
         needs_render.* = true;
     }
 }
@@ -358,7 +377,7 @@ fn handleMouseEvent(
                     }
                     if (target_pane != active_pane.*) {
                         active_pane.* = target_pane;
-                        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+                        recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
                         needs_render.* = true;
                     }
                 }
@@ -465,7 +484,7 @@ fn applyDrag(
     ds.last_col = ev.col;
     ds.last_row = ev.row;
 
-    renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+    recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
     needs_render.* = true;
 }
 
@@ -476,12 +495,81 @@ fn handleFocus(
     handler: *const input.InputHandler,
     needs_render: *bool,
     dir: Layout.Direction,
+    panes: []const Pane,
 ) void {
     if (Layout.findNeighbor(rects, active_pane.*, dir)) |neighbor| {
         active_pane.* = neighbor;
-        renderer.computeBorders(rects, active_pane.*, handler.state == .command);
+        recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
         needs_render.* = true;
     }
+}
+
+const shutdown_timeout_ns = 2 * std.time.ns_per_s;
+
+fn gracefulShutdown(panes: []Pane) void {
+    // Phase 1: Send SIGTERM to all alive panes
+    for (panes) |*pane| {
+        if (pane.isAlive()) {
+            pane.pty.sendSignal(posix.SIG.TERM) catch {};
+        }
+    }
+
+    // Phase 2: Poll for exit with timeout (2 seconds)
+    const poll_interval: u64 = 50 * std.time.ns_per_ms;
+    var elapsed: u64 = 0;
+    while (elapsed < shutdown_timeout_ns) {
+        var all_exited = true;
+        for (panes) |*pane| {
+            if (pane.isAlive()) {
+                if (pane.pty.checkExited()) |code| {
+                    pane.markExited(code);
+                } else {
+                    all_exited = false;
+                }
+            }
+        }
+        if (all_exited) return;
+        std.Thread.sleep(poll_interval);
+        elapsed += poll_interval;
+    }
+
+    // Phase 3: SIGKILL remaining alive panes
+    for (panes) |*pane| {
+        if (pane.isAlive()) {
+            pane.pty.sendSignal(posix.SIG.KILL) catch {};
+        }
+    }
+
+    // Wait for them to actually die
+    for (panes) |*pane| {
+        if (pane.isAlive()) {
+            if (pane.pty.checkExited()) |code| {
+                pane.markExited(code);
+            }
+        }
+    }
+}
+
+fn handlePaneExit(pane: *Pane) void {
+    const exit_code = pane.pty.checkExited() orelse 255;
+    pane.markExited(exit_code);
+
+    if (Pane.shouldRestart(pane.restart, exit_code)) {
+        pane.respawn() catch {};
+    }
+}
+
+fn buildPaneStates(panes: []const Pane) [max_panes]Pane.ProcessState {
+    var states: [max_panes]Pane.ProcessState = undefined;
+    for (panes, 0..) |*pane, i| {
+        states[i] = pane.process_state;
+    }
+    return states;
+}
+
+fn recomputeBorders(renderer: *Renderer, panes: []const Pane, rects: []const Layout.Rect, active_pane: usize, command_mode: bool) void {
+    const states = buildPaneStates(panes);
+    renderer.computeBordersWithState(rects, active_pane, command_mode, states[0..panes.len]);
 }
 
 fn renderAll(
@@ -511,9 +599,12 @@ fn renderAll(
         scroll_offsets[0..panes.len],
         active_pane,
     ) catch {
-        // Buffer overflow — render directly without buffering
         return;
     };
+
+    // Render exit status overlays for exited panes
+    const states = buildPaneStates(panes);
+    renderer.renderExitStatuses(writer, rects, states[0..panes.len]) catch {};
 
     try terminal.writeAll(fbs.getWritten());
 }

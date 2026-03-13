@@ -29,6 +29,7 @@ extern "c" fn execvp(
 pub const Pty = struct {
     master_fd: posix.fd_t,
     child_pid: posix.pid_t,
+    cached_exit_code: ?u32 = null,
 
     pub fn spawn(
         argv: [*:null]const ?[*:0]const u8,
@@ -95,16 +96,128 @@ pub const Pty = struct {
         return posix.write(self.master_fd, data);
     }
 
-    pub fn kill(self: *const Pty) void {
-        posix.kill(self.child_pid, posix.SIG.HUP) catch {};
+    pub fn checkExited(self: *Pty) ?u32 {
+        if (self.cached_exit_code) |code| return code;
+
+        const result = posix.waitpid(self.child_pid, std.c.W.NOHANG);
+        if (result.pid == 0) return null; // still running
+
+        const status = result.status;
+        const code: u32 = if (std.c.W.IFEXITED(status))
+            std.c.W.EXITSTATUS(status)
+        else
+            128 + std.c.W.TERMSIG(status);
+        self.cached_exit_code = code;
+        return code;
     }
 
-    pub fn deinit(self: *const Pty) void {
+    pub fn sendSignal(self: *const Pty, sig: u6) !void {
+        posix.kill(self.child_pid, sig) catch |err| switch (err) {
+            error.ProcessNotFound => return, // already dead
+            else => return err,
+        };
+    }
+
+    pub fn kill(self: *const Pty) void {
+        self.sendSignal(posix.SIG.HUP) catch {};
+    }
+
+    pub fn deinit(self: *Pty) void {
         self.kill();
-        _ = posix.waitpid(self.child_pid, 0);
+        // If checkExited already reaped the child, skip waitpid to
+        // avoid blocking on an already-reaped PID.
+        if (self.cached_exit_code == null) {
+            _ = posix.waitpid(self.child_pid, 0);
+        }
         posix.close(self.master_fd);
     }
 };
+
+test "checkExited returns null for still-running child" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "10" };
+    var pty = try Pty.spawn(&argv, .{ .rows = 24, .cols = 80 });
+    defer pty.deinit();
+
+    const result = pty.checkExited();
+    try std.testing.expect(result == null);
+}
+
+test "checkExited returns exit code after child exits" {
+    const argv = [_:null]?[*:0]const u8{"/usr/bin/true"};
+    var pty = try Pty.spawn(&argv, .{ .rows = 24, .cols = 80 });
+    defer pty.deinit();
+
+    // Poll for child exit instead of blocking read
+    var attempts: usize = 0;
+    while (attempts < 100) : (attempts += 1) {
+        if (pty.checkExited()) |_| break;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    const result = pty.checkExited();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u32, 0), result.?);
+}
+
+test "checkExited caches result on subsequent calls" {
+    const argv = [_:null]?[*:0]const u8{"/usr/bin/true"};
+    var pty = try Pty.spawn(&argv, .{ .rows = 24, .cols = 80 });
+    defer pty.deinit();
+
+    // Poll for child exit
+    var attempts: usize = 0;
+    while (attempts < 100) : (attempts += 1) {
+        if (pty.checkExited()) |_| break;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    const first = pty.checkExited();
+    const second = pty.checkExited();
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(first.?, second.?);
+}
+
+test "sendSignal sends SIGTERM to child" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "30" };
+    var pty = try Pty.spawn(&argv, .{ .rows = 24, .cols = 80 });
+    defer pty.deinit();
+
+    // Child should be running
+    try std.testing.expect(pty.checkExited() == null);
+
+    // Send SIGTERM
+    try pty.sendSignal(posix.SIG.TERM);
+
+    // Wait for child to exit
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        if (pty.checkExited()) |_| break;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    // Child should have exited (128 + SIGTERM)
+    const code = pty.checkExited();
+    try std.testing.expect(code != null);
+    try std.testing.expectEqual(@as(u32, 128 + 15), code.?); // SIGTERM = 15
+}
+
+test "sendSignal sends SIGKILL to child" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "30" };
+    var pty = try Pty.spawn(&argv, .{ .rows = 24, .cols = 80 });
+    defer pty.deinit();
+
+    try pty.sendSignal(posix.SIG.KILL);
+
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        if (pty.checkExited()) |_| break;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    const code = pty.checkExited();
+    try std.testing.expect(code != null);
+    try std.testing.expectEqual(@as(u32, 128 + 9), code.?); // SIGKILL = 9
+}
 
 test "spawn runs child and reads output" {
     const argv = [_:null]?[*:0]const u8{ "/bin/echo", "hello" };

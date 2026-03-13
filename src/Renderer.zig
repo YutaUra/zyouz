@@ -10,9 +10,12 @@ const BorderDir = struct {
     vertical: bool = false,
 };
 
+const Pane = @import("Pane.zig");
+
 const active_color = Screen.Color{ .indexed = 2 }; // green
 const command_mode_color = Screen.Color{ .indexed = 3 }; // yellow
 const inactive_color = Screen.Color{ .indexed = 8 }; // dark gray
+const error_color = Screen.Color{ .indexed = 1 }; // red
 
 width: u16,
 height: u16,
@@ -46,6 +49,10 @@ pub fn deinit(self: *Renderer) void {
 }
 
 pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: usize, command_mode: bool) void {
+    self.computeBordersWithState(rects, active_pane, command_mode, null);
+}
+
+pub fn computeBordersWithState(self: *Renderer, rects: []const Layout.Rect, active_pane: usize, command_mode: bool, pane_states: ?[]const Pane.ProcessState) void {
     const active_border_color = if (command_mode) command_mode_color else active_color;
     const w: usize = self.width;
     const h: usize = self.height;
@@ -93,13 +100,15 @@ pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: 
         }
     }
 
-    // Pass 3: Color assignment — active pane adjacent borders get highlight
+    // Pass 3: Color assignment — active pane adjacent borders get highlight,
+    // exited panes with non-zero exit code get red borders.
     for (0..h) |row| {
         for (0..w) |col| {
             const idx = row * w + col;
             if (!self.border_grid[idx].horizontal and !self.border_grid[idx].vertical) continue;
 
             var is_active_adjacent = false;
+            var has_error_adjacent = false;
             for (rects, 0..) |r, pi| {
                 const r_right: usize = @as(usize, r.col) + @as(usize, r.width);
                 const r_bottom: usize = @as(usize, r.row) + @as(usize, r.height);
@@ -107,12 +116,26 @@ pub fn computeBorders(self: *Renderer, rects: []const Layout.Rect, active_pane: 
                     (col + 1 == r.col and row >= r.row and row < r_bottom) or
                     (row == r_bottom and col >= r.col and col < r_right) or
                     (row + 1 == r.row and col >= r.col and col < r_right);
-                if (adjacent and pi == active_pane) {
-                    is_active_adjacent = true;
-                    break;
+                if (adjacent) {
+                    if (pi == active_pane) is_active_adjacent = true;
+                    if (pane_states) |states| {
+                        if (pi < states.len) {
+                            switch (states[pi]) {
+                                .exited => |code| if (code != 0) {
+                                    has_error_adjacent = true;
+                                },
+                                .running => {},
+                            }
+                        }
+                    }
                 }
             }
-            self.border_colors[idx] = if (is_active_adjacent) active_border_color else inactive_color;
+            self.border_colors[idx] = if (has_error_adjacent)
+                error_color
+            else if (is_active_adjacent)
+                active_border_color
+            else
+                inactive_color;
         }
     }
 
@@ -169,6 +192,10 @@ fn resolveChars(self: *Renderer) void {
             };
         }
     }
+}
+
+pub fn formatExitStatus(buf: []u8, exit_code: u32) []const u8 {
+    return std.fmt.bufPrint(buf, "[exit:{d}]", .{exit_code}) catch "";
 }
 
 pub fn borderCellAt(self: *const Renderer, row: u16, col: u16) *const Screen.Cell {
@@ -334,6 +361,37 @@ pub fn renderBorders(self: *const Renderer, writer: anytype) !void {
         }
     }
     try writer.writeAll("\x1b[0m");
+}
+
+pub fn renderExitStatuses(self: *const Renderer, writer: anytype, rects: []const Layout.Rect, pane_states: []const Pane.ProcessState) !void {
+    _ = self;
+    for (rects, 0..) |rect, pi| {
+        if (pi >= pane_states.len) break;
+        switch (pane_states[pi]) {
+            .exited => |code| {
+                var status_buf: [16]u8 = undefined;
+                const status = formatExitStatus(&status_buf, code);
+                if (status.len == 0) continue;
+                // Place exit status at top-right corner of the pane
+                const status_len: u16 = @intCast(status.len);
+                if (status_len > rect.width) continue;
+                const col = @as(u32, rect.col) + @as(u32, rect.width) - @as(u32, status_len);
+                try std.fmt.format(writer, "\x1b[{d};{d}H", .{
+                    @as(u32, rect.row) + 1,
+                    col + 1,
+                });
+                // Use inverse + red for non-zero, inverse + green for zero
+                if (code != 0) {
+                    try writer.writeAll("\x1b[0;31;7m"); // red inverse
+                } else {
+                    try writer.writeAll("\x1b[0;32;7m"); // green inverse
+                }
+                try writer.writeAll(status);
+                try writer.writeAll("\x1b[0m");
+            },
+            .running => {},
+        }
+    }
 }
 
 pub fn renderFrame(
@@ -743,4 +801,43 @@ test "no scroll indicator when offset = 0" {
     // Scroll indicator format is "[N/M]" — should not appear at offset=0
     try std.testing.expect(std.mem.indexOf(u8, output, "[0/") == null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[0;7m") == null);
+}
+
+test "formatExitStatus produces correct string" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("[exit:0]", Renderer.formatExitStatus(&buf, 0));
+    try std.testing.expectEqualStrings("[exit:1]", Renderer.formatExitStatus(&buf, 1));
+    try std.testing.expectEqualStrings("[exit:127]", Renderer.formatExitStatus(&buf, 127));
+}
+
+test "exited pane with exit code 0 gets green border" {
+    const rects = &[_]Layout.Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    const pane_states = &[_]Pane.ProcessState{ .running, .{ .exited = 0 } };
+
+    var renderer = try Renderer.init(std.testing.allocator, 81, 24);
+    defer renderer.deinit();
+
+    renderer.computeBordersWithState(rects, 0, false, pane_states);
+    // Border at col 40 adjacent to pane 1 (exited 0): should be green (active color)
+    const border = renderer.borderCellAt(0, 40);
+    try std.testing.expectEqual(Screen.Color{ .indexed = 2 }, border.fg);
+}
+
+test "exited pane with non-zero exit code gets red border" {
+    const rects = &[_]Layout.Rect{
+        .{ .col = 0, .row = 0, .width = 40, .height = 24 },
+        .{ .col = 41, .row = 0, .width = 40, .height = 24 },
+    };
+    const pane_states = &[_]Pane.ProcessState{ .running, .{ .exited = 1 } };
+
+    var renderer = try Renderer.init(std.testing.allocator, 81, 24);
+    defer renderer.deinit();
+
+    renderer.computeBordersWithState(rects, 1, false, pane_states);
+    // Border at col 40 adjacent to pane 1 (exited non-zero): should be red
+    const border = renderer.borderCellAt(0, 40);
+    try std.testing.expectEqual(Screen.Color{ .indexed = 1 }, border.fg);
 }

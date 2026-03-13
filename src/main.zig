@@ -85,6 +85,7 @@ pub fn main() !void {
         for (0..pane_count) |i| {
             try panes_buf[i].initFromCommand(allocator, leaves.items[i].command, rects[i]);
             panes_buf[i].mouse_mode = leaves.items[i].mouse;
+            panes_buf[i].restart = leaves.items[i].restart;
         }
         const panes = panes_buf[0..pane_count];
         defer {

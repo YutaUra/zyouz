@@ -23,6 +23,7 @@
             zig
             zls
           ];
+          ZYOUZ_CONFIG = "./config.dev.zon";
         };
       }
     );

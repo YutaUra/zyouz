@@ -32,6 +32,7 @@ pub fn main() !void {
 
     var config = Config.parseFile(allocator, config_path) catch |err| {
         std.debug.print("error: failed to load config from {s}: {s}\n", .{ config_path, @errorName(err) });
+        std.debug.print("hint: set ZYOUZ_CONFIG to override the config file path\n", .{});
         std.process.exit(1);
     };
     defer config.deinit();

@@ -197,8 +197,12 @@ pub fn parseFile(allocator: Allocator, path: []const u8) ParseError!Config {
     return parseFromSlice(allocator, source);
 }
 
-/// Returns the default config file path: ~/.config/zyouz/config.zon
+/// Returns the config file path.
+/// Checks the ZYOUZ_CONFIG env var first; falls back to ~/.config/zyouz/config.zon.
 pub fn defaultConfigPath(allocator: Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "ZYOUZ_CONFIG")) |path| {
+        return path;
+    } else |_| {}
     const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.OutOfMemory;
     defer allocator.free(home);
     return std.fmt.allocPrint(allocator, "{s}/.config/zyouz/config.zon", .{home});
@@ -556,10 +560,32 @@ test "resolveLayout: error when named layout not found" {
     try std.testing.expectError(error.LayoutNotFound, config.resolveLayout("nonexistent"));
 }
 
-test "defaultConfigPath: contains .config/zyouz/config.zon" {
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+};
+
+test "defaultConfigPath: falls back to ~/.config/zyouz/config.zon when ZYOUZ_CONFIG is not set" {
+    // Save and clear ZYOUZ_CONFIG so the test is env-independent.
+    const saved = c_env.getenv("ZYOUZ_CONFIG");
+    _ = c_env.unsetenv("ZYOUZ_CONFIG");
+    defer if (saved) |s| {
+        _ = c_env.setenv("ZYOUZ_CONFIG", s, 1);
+    };
+
     const path = try defaultConfigPath(std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expect(std.mem.endsWith(u8, path, "/.config/zyouz/config.zon"));
+}
+
+test "defaultConfigPath: ZYOUZ_CONFIG overrides default path" {
+    _ = c_env.setenv("ZYOUZ_CONFIG", "/custom/path/config.zon", 1);
+    defer _ = c_env.unsetenv("ZYOUZ_CONFIG");
+
+    const path = try defaultConfigPath(std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/custom/path/config.zon", path);
 }
 
 test "parseFromSlice: prefix_key is parsed" {

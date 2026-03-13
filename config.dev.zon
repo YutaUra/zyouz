@@ -1,0 +1,35 @@
+.{
+    .layouts = .{
+        .{
+            .name = "default",
+            .root = .{
+                .direction = .horizontal,
+                .children = .{
+                    .{ .command = .{"/bin/bash"}, .name = "left" },
+                    .{ .command = .{"/bin/bash"}, .name = "right" },
+                },
+            },
+        },
+        .{
+            .name = "dev",
+            .root = .{
+                .direction = .horizontal,
+                .children = .{
+                    .{
+                        .command = .{"/bin/bash"},
+                        .mouse = .passthrough,
+                        .size = .{ .percent = 60 },
+                        .name = "editor",
+                    },
+                    .{
+                        .direction = .vertical,
+                        .children = .{
+                            .{ .command = .{"/bin/bash"}, .name = "server" },
+                            .{ .command = .{"/bin/bash"}, .name = "terminal" },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}

@@ -39,11 +39,11 @@ pub fn main() !void {
 
     const layout = config.resolveLayout(layout_name) catch |err| switch (err) {
         error.NoDefaultLayout => {
-            std.debug.print("error: no 'default' layout found in config\n", .{});
+            std.debug.print("error: no 'default' layout found in {s}\n", .{config_path});
             std.process.exit(1);
         },
         error.LayoutNotFound => {
-            std.debug.print("error: layout '{s}' not found in config\n", .{layout_name.?});
+            std.debug.print("error: layout '{s}' not found in {s}\n", .{ layout_name.?, config_path });
             std.process.exit(1);
         },
     };

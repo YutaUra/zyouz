@@ -26,6 +26,31 @@ Or run without installing:
 nix run github:YutaUra/zyouz
 ```
 
+#### Home Manager
+
+```nix
+{
+  inputs.zyouz.url = "github:YutaUra/zyouz";
+
+  # In your home-manager configuration:
+  imports = [ zyouz.homeManagerModules.default ];
+
+  programs.zyouz = {
+    enable = true;
+    config = ''
+      .{
+          .layouts = .{
+              .{
+                  .name = "default",
+                  .root = .{ .command = .{"/bin/bash"} },
+              },
+          },
+      }
+    '';
+  };
+}
+```
+
 ### Build from source
 
 Requires [Zig](https://ziglang.org/) 0.15.2 or later.

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-03-14
+
+### Added
+
+- **OSC 22 cursor shape on pane borders**: mouse cursor changes to resize arrows (`ew-resize`/`ns-resize`) when hovering over draggable borders, and `grab` at junction points
+- **Junction drag support**: T-junctions and cross-intersections now support dragging in both directions — the drag axis is determined by the initial mouse movement
+- **Any-event mouse tracking** (`?1003h`): enables cursor shape feedback on hover without requiring a button press
+- **Home Manager module** for declarative NixOS/home-manager configuration
+- **`.motion` mouse event kind** in MouseParser for button-less mouse movement
+
+### Changed
+
+- **Improved rendering pipeline** with better terminal compatibility
+- **VT parser generalized CSI prefix handling** to support Kitty keyboard protocol sequences (`>`, `<`, `=` prefixes) without leaking characters
+
 ## [0.1.1] - 2026-03-13
 
 ### Added

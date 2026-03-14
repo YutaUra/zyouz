@@ -54,13 +54,13 @@ pub const Terminal = struct {
     }
 
     pub fn enableMouseTracking(self: *const Terminal) !void {
-        // Enable button-event tracking (reports drag) + SGR extended coordinates.
-        // ?1002h = report press, release, and motion-while-button-held.
-        try self.writeAll("\x1b[?1002h\x1b[?1006h");
+        // Enable any-event tracking + SGR extended coordinates.
+        // ?1003h = report all mouse events including button-less motion.
+        try self.writeAll("\x1b[?1003h\x1b[?1006h");
     }
 
     pub fn disableMouseTracking(self: *const Terminal) !void {
-        try self.writeAll("\x1b[?1006l\x1b[?1002l");
+        try self.writeAll("\x1b[?1006l\x1b[?1003l");
     }
 
     pub fn getSize(self: *const Terminal) !Size {

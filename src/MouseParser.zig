@@ -15,6 +15,7 @@ pub const MouseEventKind = enum {
     press,
     release,
     drag,
+    motion,
 };
 
 pub const MouseEvent = struct {
@@ -30,7 +31,7 @@ pub const MouseEvent = struct {
     pub fn formatSgr(self: MouseEvent, buf: []u8, pane_col: u16, pane_row: u16) []const u8 {
         const local_col = self.col - pane_col + 1; // 1-based
         const local_row = self.row - pane_row + 1;
-        const final: u8 = if (self.kind == .press) 'M' else 'm';
+        const final: u8 = if (self.kind == .release) 'm' else 'M';
         const len = std.fmt.bufPrint(buf, "\x1b[<{d};{d};{d}{c}", .{
             self.button_code, local_col, local_row, final,
         }) catch return "";
@@ -154,7 +155,9 @@ fn parseParams(self: *const MouseParser, final: u8) ?MouseEvent {
         else => .none,
     };
 
-    const kind: MouseEventKind = if (is_motion)
+    const kind: MouseEventKind = if (is_motion and base_button == 3)
+        .motion
+    else if (is_motion)
         .drag
     else if (final == 'M')
         .press
@@ -428,6 +431,35 @@ test "SGR scroll right (button 67)" {
 
     const result = parser.feed('M');
     try std.testing.expectEqual(MouseButton.scroll_right, result.event.button);
+}
+
+test "SGR motion event (button code 35) parsed as motion with no button" {
+    var parser = MouseParser{};
+
+    // button code 35 = 32 (motion bit) + 3 (no button held)
+    for ("\x1b[<35;15;10") |byte| {
+        _ = parser.feed(byte);
+    }
+
+    const result = parser.feed('M');
+    try std.testing.expectEqual(MouseEventKind.motion, result.event.kind);
+    try std.testing.expectEqual(MouseButton.none, result.event.button);
+    try std.testing.expectEqual(@as(u16, 14), result.event.col);
+    try std.testing.expectEqual(@as(u16, 9), result.event.row);
+    try std.testing.expectEqual(@as(u16, 35), result.event.button_code);
+}
+
+test "formatSgr produces press with uppercase M for motion" {
+    const ev = MouseEvent{
+        .button = .none,
+        .col = 5,
+        .row = 3,
+        .kind = .motion,
+        .button_code = 35,
+    };
+    var buf: [32]u8 = undefined;
+    const result = ev.formatSgr(&buf, 0, 0);
+    try std.testing.expectEqualStrings("\x1b[<35;6;4M", result);
 }
 
 test "invalid byte in params state resets to ground" {

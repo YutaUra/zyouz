@@ -19,7 +19,9 @@ screen: *Screen,
 state: State,
 params: [max_params]u16,
 param_count: u8,
-private_mode: bool,
+/// Leading CSI prefix byte: '?' for DEC private, '>' / '<' / '=' for
+/// Kitty keyboard protocol and similar extensions, 0 for standard CSI.
+csi_prefix: u8,
 utf8_buf: [4]u8 = undefined,
 utf8_len: u3 = 0,
 utf8_expected: u3 = 0,
@@ -34,7 +36,7 @@ pub fn init(screen: *Screen) VtParser {
         .state = .ground,
         .params = [_]u16{0} ** max_params,
         .param_count = 0,
-        .private_mode = false,
+        .csi_prefix = 0,
     };
 }
 
@@ -150,8 +152,8 @@ fn processCsi(self: *VtParser, byte: u8) void {
             }
             self.state = .csi_param;
         },
-        '?' => {
-            self.private_mode = true;
+        '?', '<', '=', '>' => {
+            self.csi_prefix = byte;
             self.state = .csi_param;
         },
         0x20...0x2F => self.state = .csi_intermediate,
@@ -188,10 +190,13 @@ fn processOsc(self: *VtParser, byte: u8) void {
 }
 
 fn dispatchCsi(self: *VtParser, final: u8) void {
-    if (self.private_mode) {
-        self.dispatchPrivateMode(final);
+    if (self.csi_prefix == '?') {
+        self.dispatchDecPrivate(final);
         return;
     }
+    // CSI sequences with '>', '<', '=' prefixes (e.g. Kitty keyboard
+    // protocol) are silently consumed — we don't support them yet.
+    if (self.csi_prefix != 0) return;
     switch (final) {
         'H', 'f' => { // CUP — Cursor Position
             const row = self.getParam(0, 1);
@@ -273,7 +278,7 @@ fn dispatchCsi(self: *VtParser, final: u8) void {
     }
 }
 
-fn dispatchPrivateMode(self: *VtParser, final: u8) void {
+fn dispatchDecPrivate(self: *VtParser, final: u8) void {
     const param = self.getParam(0, 0);
     switch (final) {
         'h' => { // DECSET
@@ -457,7 +462,7 @@ fn getParam(self: *const VtParser, idx: u8, default: u16) u16 {
 fn resetParams(self: *VtParser) void {
     self.params = [_]u16{0} ** max_params;
     self.param_count = 0;
-    self.private_mode = false;
+    self.csi_prefix = 0;
 }
 
 test "printable ASCII writes to screen" {
@@ -905,4 +910,49 @@ test "CSI T scrolls content down" {
     try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(1, 0).char);
     // Row 2 should now be "BBB"
     try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(2, 0).char);
+}
+
+test "CSI with > prefix is silently consumed (Kitty keyboard push)" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // \e[>1u (push keyboard mode) must not print "1u"
+    parser.feed("\x1b[>1u");
+    parser.feed("A");
+
+    try std.testing.expectEqual(@as(u21, 'A'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 1), screen.cursor_col);
+}
+
+test "CSI with < prefix is silently consumed (Kitty keyboard pop)" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // \e[<u (pop keyboard mode) must not print "u"
+    parser.feed("\x1b[<u");
+    parser.feed("B");
+
+    try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u16, 1), screen.cursor_col);
+}
+
+test "Kitty keyboard push + pop produces no visible output" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // Simulate Claude Code startup: query + push + pop
+    parser.feed("\x1b[?u"); // query keyboard mode
+    parser.feed("\x1b[>1u"); // push keyboard mode
+    parser.feed("\x1b[<u"); // pop keyboard mode
+    parser.feed("X");
+
+    // Only 'X' should be visible — no "1uu" or any other leaked chars
+    try std.testing.expectEqual(@as(u21, 'X'), screen.cellAt(0, 0).char);
+    try std.testing.expectEqual(@as(u21, ' '), screen.cellAt(0, 1).char);
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor_row);
+    try std.testing.expectEqual(@as(u16, 1), screen.cursor_col);
 }

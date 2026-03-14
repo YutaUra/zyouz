@@ -101,6 +101,79 @@ pub fn run(terminal: *Terminal.Terminal, pty: *Pty.Pty) !void {
     }
 }
 
+const CursorShape = enum {
+    default,
+    ew_resize,
+    ns_resize,
+    grab,
+};
+
+fn setCursorShape(terminal: *const Terminal.Terminal, shape: CursorShape, current: *CursorShape) void {
+    if (shape == current.*) return;
+    // OSC 22 with ST terminator (\x1b\\) for wider terminal compatibility.
+    // Using ew-resize/ns-resize from the kitty pointer-shapes standard
+    // (col-resize/row-resize are not in the standard 30 CSS names).
+    const seq = switch (shape) {
+        .default => "\x1b]22;default\x1b\\",
+        .ew_resize => "\x1b]22;ew-resize\x1b\\",
+        .ns_resize => "\x1b]22;ns-resize\x1b\\",
+        .grab => "\x1b]22;grab\x1b\\",
+    };
+    terminal.writeAll(seq) catch {};
+    current.* = shape;
+}
+
+const JunctionBorders = struct {
+    vertical: ?Layout.BorderInfo = null,
+    horizontal: ?Layout.BorderInfo = null,
+};
+
+/// At a junction (T or cross), scan nearby cells to find both the vertical
+/// and horizontal borders. borderAt's straight-line scan fails at junctions
+/// because the perpendicular gap blocks it, so we scan along each axis
+/// separately and filter by orientation.
+fn findJunctionBorders(rects: []const Layout.Rect, row: u16, col: u16) JunctionBorders {
+    var result = JunctionBorders{};
+    var d: u16 = 1;
+    while (d <= 4) : (d += 1) {
+        // Scan up/down to find a vertical border segment
+        if (result.vertical == null) {
+            if (row >= d) {
+                if (Layout.borderAt(rects, row - d, col)) |b| {
+                    if (b.is_vertical) result.vertical = b;
+                }
+            }
+            if (result.vertical == null) {
+                if (Layout.borderAt(rects, row + d, col)) |b| {
+                    if (b.is_vertical) result.vertical = b;
+                }
+            }
+        }
+        // Scan left/right to find a horizontal border segment
+        if (result.horizontal == null) {
+            if (col >= d) {
+                if (Layout.borderAt(rects, row, col - d)) |b| {
+                    if (!b.is_vertical) result.horizontal = b;
+                }
+            }
+            if (result.horizontal == null) {
+                if (Layout.borderAt(rects, row, col + d)) |b| {
+                    if (!b.is_vertical) result.horizontal = b;
+                }
+            }
+        }
+        if (result.vertical != null and result.horizontal != null) break;
+    }
+    return result;
+}
+
+/// Returns true if the position is a junction point (not inside any pane
+/// and not on a simple border).
+fn isJunction(rects: []const Layout.Rect, row: u16, col: u16) bool {
+    return Layout.borderAt(rects, row, col) == null and
+        Layout.paneAt(rects, row, col) == null;
+}
+
 const max_panes = 32;
 
 pub fn runMultiPane(
@@ -122,7 +195,11 @@ pub fn runMultiPane(
 
     // Enable mouse tracking (SGR mode for extended coordinates)
     try terminal.enableMouseTracking();
-    defer terminal.disableMouseTracking() catch {};
+    var cursor_shape: CursorShape = .default;
+    defer {
+        setCursorShape(terminal, .default, &cursor_shape);
+        terminal.disableMouseTracking() catch {};
+    }
 
     var handler = input.InputHandler.initWithPrefix(prefix_key);
     var mouse_parser = MouseParser{};
@@ -240,7 +317,7 @@ pub fn runMultiPane(
                         },
                         .consumed => {},
                         .event => |ev| {
-                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render, pane_gap);
+                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render, pane_gap, terminal, &cursor_shape);
                         },
                         .escape_passthrough => |b| {
                             processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
@@ -325,6 +402,10 @@ fn processKeyByte(
 
 const DragState = struct {
     border: Layout.BorderInfo,
+    /// Second border at a junction point. On the first drag event,
+    /// the direction of mouse movement determines which border to use,
+    /// then this field is cleared to null.
+    alt_border: ?Layout.BorderInfo = null,
     last_col: u16,
     last_row: u16,
 };
@@ -342,7 +423,24 @@ fn findBorderNear(rects: []const Layout.Rect, row: u16, col: u16) ?Layout.Border
     if (Layout.borderAt(rects, row, col)) |b| return b;
 
     // Click is inside a pane — check if we're on the pane edge.
-    const pane_idx = Layout.paneAt(rects, row, col) orelse return null;
+    const pane_idx = Layout.paneAt(rects, row, col) orelse {
+        // Junction point: not inside any pane and borderAt failed.
+        // At T-junctions and cross-intersections, borderAt's straight-line
+        // scan can't find panes because the perpendicular gap blocks it.
+        // Scan nearby cells to find a valid border.
+        var d: u16 = 1;
+        while (d <= 4) : (d += 1) {
+            if (row >= d) {
+                if (Layout.borderAt(rects, row - d, col)) |b| return b;
+            }
+            if (Layout.borderAt(rects, row + d, col)) |b| return b;
+            if (col >= d) {
+                if (Layout.borderAt(rects, row, col - d)) |b| return b;
+            }
+            if (Layout.borderAt(rects, row, col + d)) |b| return b;
+        }
+        return null;
+    };
     const r = rects[pane_idx];
 
     // Right edge of pane (last content column)
@@ -382,8 +480,25 @@ fn handleMouseEvent(
     drag_state: *?DragState,
     needs_render: *bool,
     pane_gap: u16,
+    terminal: *const Terminal.Terminal,
+    cursor_shape: *CursorShape,
 ) void {
     switch (ev.kind) {
+        .motion => {
+            if (isJunction(rects, ev.row, ev.col)) {
+                const jb = findJunctionBorders(rects, ev.row, ev.col);
+                if (jb.vertical != null or jb.horizontal != null) {
+                    setCursorShape(terminal, .grab, cursor_shape);
+                } else {
+                    setCursorShape(terminal, .default, cursor_shape);
+                }
+            } else if (findBorderNear(rects, ev.row, ev.col)) |border| {
+                const shape: CursorShape = if (border.is_vertical) .ew_resize else .ns_resize;
+                setCursorShape(terminal, shape, cursor_shape);
+            } else {
+                setCursorShape(terminal, .default, cursor_shape);
+            }
+        },
         .press => {
             if (ev.button == .scroll_up or ev.button == .scroll_down or
                 ev.button == .scroll_left or ev.button == .scroll_right)
@@ -409,6 +524,20 @@ fn handleMouseEvent(
                 return;
             }
             if (ev.button == .left) {
+                // Check if clicking on a junction (T or cross intersection)
+                if (isJunction(rects, ev.row, ev.col)) {
+                    const jb = findJunctionBorders(rects, ev.row, ev.col);
+                    if (jb.vertical != null or jb.horizontal != null) {
+                        drag_state.* = .{
+                            .border = jb.vertical orelse jb.horizontal.?,
+                            .alt_border = if (jb.vertical != null) jb.horizontal else null,
+                            .last_col = ev.col,
+                            .last_row = ev.row,
+                        };
+                        setCursorShape(terminal, .grab, cursor_shape);
+                        return;
+                    }
+                }
                 // Check if clicking on or near a border to start drag
                 if (findBorderNear(rects, ev.row, ev.col)) |border| {
                     drag_state.* = .{
@@ -416,6 +545,8 @@ fn handleMouseEvent(
                         .last_col = ev.col,
                         .last_row = ev.row,
                     };
+                    const shape: CursorShape = if (border.is_vertical) .ew_resize else .ns_resize;
+                    setCursorShape(terminal, shape, cursor_shape);
                     return;
                 }
                 // Click on pane to focus
@@ -438,6 +569,20 @@ fn handleMouseEvent(
         .drag => {
             if (ev.button == .left) {
                 if (drag_state.*) |*ds| {
+                    // At a junction, resolve which border to drag based on
+                    // the direction of the first mouse movement.
+                    if (ds.alt_border != null) {
+                        const dx: u32 = @abs(@as(i32, ev.col) - @as(i32, ds.last_col));
+                        const dy: u32 = @abs(@as(i32, ev.row) - @as(i32, ds.last_row));
+                        if (dx == 0 and dy == 0) return; // wait for movement
+                        if (dy > dx) {
+                            // Vertical mouse movement → drag the horizontal border
+                            ds.border = ds.alt_border.?;
+                        }
+                        ds.alt_border = null;
+                        const shape: CursorShape = if (ds.border.is_vertical) .ew_resize else .ns_resize;
+                        setCursorShape(terminal, shape, cursor_shape);
+                    }
                     applyDrag(ds, ev, panes, rects, renderer, active_pane, handler, needs_render, pane_gap);
                 } else {
                     // Drag on a passthrough pane → forward
@@ -455,6 +600,7 @@ fn handleMouseEvent(
         },
         .release => {
             drag_state.* = null;
+            setCursorShape(terminal, .default, cursor_shape);
             // Forward release to passthrough panes
             if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
                 if (panes[target_pane].mouse_mode == .passthrough) {

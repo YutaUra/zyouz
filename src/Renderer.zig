@@ -266,7 +266,18 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
             // The wide character already consumed 2 terminal columns.
             if (cell.char == 0) continue;
 
-            // Emit OSC 8 when hyperlink changes
+            // Emit SGR only when attributes change.
+            // writeSgr emits \x1b[0m which may close OSC 8 in some
+            // terminals, so reset last_hyperlink to force re-emission.
+            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style))
+            {
+                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+                last_hyperlink = 0;
+            }
+
+            // Emit OSC 8 after SGR so the hyperlink is not closed by
+            // the SGR reset (\x1b[0m).
             if (cell.hyperlink != last_hyperlink) {
                 if (cell.hyperlink == 0) {
                     try writer.writeAll("\x1b]8;;\x1b\\");
@@ -276,13 +287,6 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
                     try writer.writeAll("\x1b\\");
                 }
                 last_hyperlink = cell.hyperlink;
-            }
-
-            // Emit SGR only when attributes change
-            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
-                !std.meta.eql(cell.style, last_style))
-            {
-                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
             }
 
             // Write character as UTF-8
@@ -350,7 +354,18 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
             // Skip continuation cells (right half of wide characters).
             if (cell.char == 0) continue;
 
-            // Emit OSC 8 when hyperlink changes
+            // Emit SGR only when attributes change.
+            // writeSgr emits \x1b[0m which may close OSC 8 in some
+            // terminals, so reset last_hyperlink to force re-emission.
+            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style))
+            {
+                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+                last_hyperlink = 0;
+            }
+
+            // Emit OSC 8 after SGR so the hyperlink is not closed by
+            // the SGR reset (\x1b[0m).
             if (cell.hyperlink != last_hyperlink) {
                 if (cell.hyperlink == 0) {
                     try writer.writeAll("\x1b]8;;\x1b\\");
@@ -360,12 +375,6 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
                     try writer.writeAll("\x1b\\");
                 }
                 last_hyperlink = cell.hyperlink;
-            }
-
-            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
-                !std.meta.eql(cell.style, last_style))
-            {
-                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
             }
 
             var buf: [4]u8 = undefined;

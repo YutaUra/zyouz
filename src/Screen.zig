@@ -26,6 +26,8 @@ pub const Cell = struct {
     /// True when this cell is the left half of a wide (2-column) character.
     /// The right half is a continuation cell with char = 0.
     wide: bool = false,
+    /// Index into Screen.hyperlink_urls (1-based); 0 means no hyperlink.
+    hyperlink: u16 = 0,
 };
 
 /// Return the display width of a Unicode codepoint: 2 for fullwidth/wide
@@ -71,6 +73,8 @@ scrollback: ?[][]Cell,
 scrollback_capacity: usize,
 scrollback_head: usize,
 scrollback_count: usize,
+hyperlink_urls: std.ArrayListUnmanaged([]const u8) = .empty,
+current_hyperlink: u16 = 0,
 
 pub fn init(allocator: Allocator, width: u16, height: u16) !Screen {
     const cells = try allocator.alloc(Cell, @as(usize, width) * @as(usize, height));
@@ -113,6 +117,10 @@ pub fn initWithScrollback(allocator: Allocator, width: u16, height: u16, capacit
 }
 
 pub fn deinit(self: *Screen) void {
+    for (self.hyperlink_urls.items) |url| {
+        self.allocator.free(url);
+    }
+    self.hyperlink_urls.deinit(self.allocator);
     if (self.scrollback) |sb| {
         for (sb) |row| {
             self.allocator.free(row);
@@ -184,6 +192,7 @@ pub fn writeChar(self: *Screen, char: u21) void {
         .bg = self.current_bg,
         .style = self.current_style,
         .wide = (w == 2),
+        .hyperlink = self.current_hyperlink,
     };
 
     if (w == 2) {
@@ -266,6 +275,7 @@ pub fn resetAttributes(self: *Screen) void {
     self.current_style = .{};
     self.current_fg = .default;
     self.current_bg = .default;
+    self.current_hyperlink = 0;
 }
 
 pub fn eraseInDisplay(self: *Screen, mode: EraseMode) void {
@@ -389,6 +399,22 @@ pub fn saveCursor(self: *Screen) void {
 pub fn restoreCursor(self: *Screen) void {
     self.cursor_row = self.saved_cursor_row;
     self.cursor_col = self.saved_cursor_col;
+}
+
+pub fn internHyperlink(self: *Screen, url: []const u8) !u16 {
+    for (self.hyperlink_urls.items, 0..) |existing, i| {
+        if (std.mem.eql(u8, existing, url)) return @intCast(i + 1);
+    }
+    const duped = try self.allocator.dupe(u8, url);
+    try self.hyperlink_urls.append(self.allocator, duped);
+    return @intCast(self.hyperlink_urls.items.len);
+}
+
+pub fn hyperlinkUrl(self: *const Screen, idx: u16) ?[]const u8 {
+    if (idx == 0) return null;
+    const i = idx - 1;
+    if (i >= self.hyperlink_urls.items.len) return null;
+    return self.hyperlink_urls.items[i];
 }
 
 fn clearRow(self: *Screen, row: u16) void {
@@ -818,6 +844,22 @@ test "scrollbackLine returns null for out-of-range index" {
 
     try std.testing.expect(screen.scrollbackLine(0) != null);
     try std.testing.expect(screen.scrollbackLine(1) == null);
+}
+
+test "cell stores hyperlink index" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    const url = "https://example.com";
+    const idx = try screen.internHyperlink(url);
+    try std.testing.expect(idx > 0);
+
+    screen.current_hyperlink = idx;
+    screen.writeChar('A');
+
+    const cell = screen.cellAt(0, 0);
+    try std.testing.expectEqual(idx, cell.hyperlink);
+    try std.testing.expectEqualStrings(url, screen.hyperlinkUrl(idx).?);
 }
 
 test "carriageReturn clears wrap_pending" {

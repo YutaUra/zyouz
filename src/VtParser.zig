@@ -1019,6 +1019,38 @@ test "OSC 8 hyperlink with BEL terminator" {
     );
 }
 
+test "OSC 8 pipeline trace - cells have hyperlink after feed" {
+    var screen = try Screen.init(std.testing.allocator, 40, 5);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // Feed: open hyperlink, text, close hyperlink
+    parser.feed("\x1b]8;;https://example.com\x1b\\");
+
+    // After opening hyperlink, current_hyperlink should be non-zero
+    try std.testing.expect(screen.current_hyperlink > 0);
+    const link_idx = screen.current_hyperlink;
+
+    parser.feed("Click me");
+
+    // Check each cell of "Click me"
+    const expected = "Click me";
+    for (expected, 0..) |ch, i| {
+        const cell = screen.cellAt(0, @intCast(i));
+        try std.testing.expectEqual(@as(u21, ch), cell.char);
+        try std.testing.expectEqual(link_idx, cell.hyperlink);
+    }
+
+    // Close hyperlink
+    parser.feed("\x1b]8;;\x1b\\");
+    try std.testing.expectEqual(@as(u16, 0), screen.current_hyperlink);
+
+    // Next char should have no hyperlink
+    parser.feed("X");
+    const cell_x = screen.cellAt(0, 8);
+    try std.testing.expectEqual(@as(u16, 0), cell_x.hyperlink);
+}
+
 test "OSC 8 with id parameter" {
     var screen = try Screen.init(std.testing.allocator, 80, 24);
     defer screen.deinit();

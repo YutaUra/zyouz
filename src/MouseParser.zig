@@ -18,11 +18,18 @@ pub const MouseEventKind = enum {
     motion,
 };
 
+pub const Modifiers = packed struct {
+    shift: bool = false,
+    meta: bool = false,
+    ctrl: bool = false,
+};
+
 pub const MouseEvent = struct {
     button: MouseButton,
     col: u16,
     row: u16,
     kind: MouseEventKind,
+    modifiers: Modifiers = .{},
     /// Raw SGR button code, preserved for accurate passthrough forwarding.
     button_code: u16 = 0,
 
@@ -140,14 +147,21 @@ fn parseParams(self: *const MouseParser, final: u8) ?MouseEvent {
     const col = if (parts[1] > 0) parts[1] - 1 else 0;
     const row = if (parts[2] > 0) parts[2] - 1 else 0;
 
-    // Bit 5 (value 32) indicates motion/drag event.
+    // Bit layout: [7:6]=scroll, [5]=motion, [4]=ctrl, [3]=meta, [2]=shift, [1:0]=button
     const is_motion = (button_code & 32) != 0;
-    const base_button = button_code & ~@as(u16, 32);
+    const modifiers = Modifiers{
+        .shift = (button_code & 4) != 0,
+        .meta = (button_code & 8) != 0,
+        .ctrl = (button_code & 16) != 0,
+    };
+    // Strip motion bit (32) and modifier bits (4, 8, 16) to get base button.
+    const base_button = button_code & ~@as(u16, 32 | 4 | 8 | 16);
 
     const button: MouseButton = switch (base_button) {
         0 => .left,
         1 => .middle,
         2 => .right,
+        3 => .none,
         64 => .scroll_up,
         65 => .scroll_down,
         66 => .scroll_left,
@@ -169,6 +183,7 @@ fn parseParams(self: *const MouseParser, final: u8) ?MouseEvent {
         .col = col,
         .row = row,
         .kind = kind,
+        .modifiers = modifiers,
         .button_code = button_code,
     };
 }

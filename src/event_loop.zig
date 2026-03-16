@@ -101,6 +101,20 @@ pub fn run(terminal: *Terminal.Terminal, pty: *Pty.Pty) !void {
     }
 }
 
+/// Open a URL using the system default handler.
+/// Runs asynchronously so it doesn't block the event loop.
+/// Open a URL using the system default handler.
+fn openUrl(url: []const u8) void {
+    const builtin = @import("builtin");
+    const opener: []const u8 = if (builtin.os.tag == .macos) "open" else "xdg-open";
+    var child = std.process.Child.init(&.{ opener, url }, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawn() catch return;
+    _ = child.wait() catch {};
+}
+
 const CursorShape = enum {
     default,
     ew_resize,
@@ -523,6 +537,20 @@ fn handleMouseEvent(
                 }
                 return;
             }
+            if (ev.button == .left and ev.modifiers.ctrl) {
+                // Ctrl+click: open hyperlink if the cell has one.
+                // Ghostty doesn't handle OSC 8 link clicks when mouse
+                // tracking is enabled, so zyouz handles it directly.
+                if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                    const local_row = ev.row -| rects[target_pane].row;
+                    const local_col = ev.col -| rects[target_pane].col;
+                    const cell = panes[target_pane].screen.cellAt(local_row, local_col);
+                    if (panes[target_pane].screen.hyperlinkUrl(cell.hyperlink)) |url| {
+                        openUrl(url);
+                        return;
+                    }
+                }
+            }
             if (ev.button == .left) {
                 // Check if clicking on a junction (T or cross intersection)
                 if (isJunction(rects, ev.row, ev.col)) {
@@ -549,13 +577,24 @@ fn handleMouseEvent(
                     setCursorShape(terminal, shape, cursor_shape);
                     return;
                 }
-                // Click on pane to focus
+                // Click on pane to focus (or open hyperlink on active pane)
                 if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
                     if (panes[target_pane].mouse_mode == .passthrough) {
                         var sgr_buf: [32]u8 = undefined;
                         const sgr = ev.formatSgr(&sgr_buf, rects[target_pane].col, rects[target_pane].row);
                         if (sgr.len > 0) {
                             _ = panes[target_pane].pty.writeInput(sgr) catch {};
+                        }
+                    } else if (target_pane == active_pane.*) {
+                        // Non-passthrough active pane: open hyperlink if present.
+                        // Regular click on the active pane has no other purpose
+                        // (it's already focused), so use it for link opening.
+                        const local_row = ev.row -| rects[target_pane].row;
+                        const local_col = ev.col -| rects[target_pane].col;
+                        const cell = panes[target_pane].screen.cellAt(local_row, local_col);
+                        if (panes[target_pane].screen.hyperlinkUrl(cell.hyperlink)) |url| {
+                            openUrl(url);
+                            return;
                         }
                     }
                     if (target_pane != active_pane.*) {

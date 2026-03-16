@@ -862,6 +862,29 @@ test "cell stores hyperlink index" {
     try std.testing.expectEqualStrings(url, screen.hyperlinkUrl(idx).?);
 }
 
+test "internHyperlink deduplicates same URL" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    const idx1 = try screen.internHyperlink("https://example.com");
+    const idx2 = try screen.internHyperlink("https://example.com");
+    const idx3 = try screen.internHyperlink("https://other.com");
+
+    try std.testing.expectEqual(idx1, idx2);
+    try std.testing.expect(idx3 != idx1);
+}
+
+test "resetAttributes clears current hyperlink" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+
+    const idx = try screen.internHyperlink("https://example.com");
+    screen.current_hyperlink = idx;
+    screen.resetAttributes();
+
+    try std.testing.expectEqual(@as(u16, 0), screen.current_hyperlink);
+}
+
 test "carriageReturn clears wrap_pending" {
     var screen = try Screen.init(std.testing.allocator, 5, 2);
     defer screen.deinit();

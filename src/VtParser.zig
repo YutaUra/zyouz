@@ -1019,6 +1019,41 @@ test "OSC 8 hyperlink with BEL terminator" {
     );
 }
 
+test "OSC 8 with id parameter" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // id=foo:https://example.com
+    parser.feed("\x1b]8;id=foo;https://example.com\x1b\\");
+    parser.feed("X");
+
+    const cell = screen.cellAt(0, 0);
+    try std.testing.expect(cell.hyperlink > 0);
+    try std.testing.expectEqualStrings(
+        "https://example.com",
+        screen.hyperlinkUrl(cell.hyperlink).?,
+    );
+}
+
+test "OSC 8 switching links without explicit close" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b]8;;https://a.com\x1b\\");
+    parser.feed("A");
+    parser.feed("\x1b]8;;https://b.com\x1b\\");
+    parser.feed("B");
+    parser.feed("\x1b]8;;\x1b\\");
+
+    const cell_a = screen.cellAt(0, 0);
+    const cell_b = screen.cellAt(0, 1);
+
+    try std.testing.expectEqualStrings("https://a.com", screen.hyperlinkUrl(cell_a.hyperlink).?);
+    try std.testing.expectEqualStrings("https://b.com", screen.hyperlinkUrl(cell_b.hyperlink).?);
+}
+
 test "Kitty keyboard push + pop produces no visible output" {
     var screen = try Screen.init(std.testing.allocator, 80, 24);
     defer screen.deinit();

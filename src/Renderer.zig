@@ -248,6 +248,7 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
     var last_fg: Screen.Color = .default;
     var last_bg: Screen.Color = .default;
     var last_style: Screen.Style = .{};
+    var last_hyperlink: u16 = 0;
 
     var row: u16 = 0;
     while (row < screen.height) : (row += 1) {
@@ -265,6 +266,18 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
             // The wide character already consumed 2 terminal columns.
             if (cell.char == 0) continue;
 
+            // Emit OSC 8 when hyperlink changes
+            if (cell.hyperlink != last_hyperlink) {
+                if (cell.hyperlink == 0) {
+                    try writer.writeAll("\x1b]8;;\x1b\\");
+                } else if (screen.hyperlinkUrl(cell.hyperlink)) |url| {
+                    try writer.writeAll("\x1b]8;;");
+                    try writer.writeAll(url);
+                    try writer.writeAll("\x1b\\");
+                }
+                last_hyperlink = cell.hyperlink;
+            }
+
             // Emit SGR only when attributes change
             if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
                 !std.meta.eql(cell.style, last_style))
@@ -277,6 +290,10 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
             const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
             try writer.writeAll(buf[0..len]);
         }
+    }
+    // Close any open hyperlink before reset
+    if (last_hyperlink != 0) {
+        try writer.writeAll("\x1b]8;;\x1b\\");
     }
     // Reset attributes after pane
     try writer.writeAll("\x1b[0m");
@@ -292,6 +309,7 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
     var last_fg: Screen.Color = .default;
     var last_bg: Screen.Color = .default;
     var last_style: Screen.Style = .{};
+    var last_hyperlink: u16 = 0;
 
     const sb_count = screen.scrollbackLen();
 
@@ -332,6 +350,18 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
             // Skip continuation cells (right half of wide characters).
             if (cell.char == 0) continue;
 
+            // Emit OSC 8 when hyperlink changes
+            if (cell.hyperlink != last_hyperlink) {
+                if (cell.hyperlink == 0) {
+                    try writer.writeAll("\x1b]8;;\x1b\\");
+                } else if (screen.hyperlinkUrl(cell.hyperlink)) |url| {
+                    try writer.writeAll("\x1b]8;;");
+                    try writer.writeAll(url);
+                    try writer.writeAll("\x1b\\");
+                }
+                last_hyperlink = cell.hyperlink;
+            }
+
             if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
                 !std.meta.eql(cell.style, last_style))
             {
@@ -342,6 +372,11 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
             const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
             try writer.writeAll(buf[0..len]);
         }
+    }
+
+    // Close any open hyperlink before reset
+    if (last_hyperlink != 0) {
+        try writer.writeAll("\x1b]8;;\x1b\\");
     }
 
     // Scroll indicator overlay
@@ -1123,6 +1158,67 @@ test "gap=1 horizontal 2-pane produces separate rectangles" {
     try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 5).char);
     // pane1's left edge at (2,6) should be │
     try std.testing.expectEqual(@as(u21, '│'), renderer.borderCellAt(2, 6).char);
+}
+
+test "renderPaneWithOffset emits OSC 8 for hyperlinked cells" {
+    var screen = try Screen.init(std.testing.allocator, 10, 1);
+    defer screen.deinit();
+
+    // Intern a URL and set it as current hyperlink
+    const url = "https://example.com";
+    const idx = try screen.internHyperlink(url);
+    screen.current_hyperlink = idx;
+
+    // Write hyperlinked characters
+    var parser = @import("VtParser.zig").init(&screen);
+    parser.feed("link");
+
+    // Unset hyperlink and write normal characters
+    screen.current_hyperlink = 0;
+    parser.feed("text");
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 10, .height = 1 };
+    var renderer = try Renderer.init(std.testing.allocator, 10, 1);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0);
+    const output = buf.items;
+
+    // Should contain OSC 8 open sequence with the URL
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b]8;;https://example.com\x1b\\") != null);
+    // Should contain OSC 8 close sequence (empty URL)
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b]8;;\x1b\\") != null);
+}
+
+test "renderPane emits OSC 8 for hyperlinked cells" {
+    var screen = try Screen.init(std.testing.allocator, 10, 1);
+    defer screen.deinit();
+
+    const url = "https://example.com";
+    const idx = try screen.internHyperlink(url);
+    screen.current_hyperlink = idx;
+
+    var parser = @import("VtParser.zig").init(&screen);
+    parser.feed("link");
+
+    screen.current_hyperlink = 0;
+    parser.feed("text");
+
+    const rect = Layout.Rect{ .col = 0, .row = 0, .width = 10, .height = 1 };
+    var renderer = try Renderer.init(std.testing.allocator, 10, 1);
+    defer renderer.deinit();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    const output = buf.items;
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b]8;;https://example.com\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b]8;;\x1b\\") != null);
 }
 
 test "gap=0 still produces shared borders with T-junctions" {

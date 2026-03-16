@@ -188,6 +188,45 @@ fn isJunction(rects: []const Layout.Rect, row: u16, col: u16) bool {
         Layout.paneAt(rects, row, col) == null;
 }
 
+const SelectionAnchor = struct {
+    pane: usize,
+    unified_row: i64,
+    col: u16,
+};
+
+const Selection = struct {
+    pane: usize,
+    start_row: i64,
+    start_col: u16,
+    end_row: i64,
+    end_col: u16,
+
+    fn normalized(self: Selection) Selection {
+        if (self.start_row > self.end_row or
+            (self.start_row == self.end_row and self.start_col > self.end_col))
+        {
+            return .{
+                .pane = self.pane,
+                .start_row = self.end_row,
+                .start_col = self.end_col,
+                .end_row = self.start_row,
+                .end_col = self.start_col,
+            };
+        }
+        return self;
+    }
+
+    fn contains(self: Selection, unified_row: i64, col: u16) bool {
+        if (unified_row < self.start_row or unified_row > self.end_row) return false;
+        if (self.start_row == self.end_row) {
+            return col >= self.start_col and col <= self.end_col;
+        }
+        if (unified_row == self.start_row) return col >= self.start_col;
+        if (unified_row == self.end_row) return col <= self.end_col;
+        return true;
+    }
+};
+
 const max_panes = 32;
 
 pub fn runMultiPane(
@@ -865,4 +904,55 @@ fn renderAll(
     renderer.renderExitStatuses(writer, rects, states[0..panes.len]) catch {};
 
     try terminal.writeAll(render_buf.items);
+}
+
+test "Selection.contains single line" {
+    const sel = Selection{
+        .pane = 0,
+        .start_row = 5,
+        .start_col = 3,
+        .end_row = 5,
+        .end_col = 8,
+    };
+    const n = sel.normalized();
+    try std.testing.expect(n.contains(5, 3));
+    try std.testing.expect(n.contains(5, 5));
+    try std.testing.expect(n.contains(5, 8));
+    try std.testing.expect(!n.contains(5, 2));
+    try std.testing.expect(!n.contains(5, 9));
+    try std.testing.expect(!n.contains(4, 5));
+}
+
+test "Selection.contains multi line" {
+    const sel = Selection{
+        .pane = 0,
+        .start_row = 10,
+        .start_col = 5,
+        .end_row = 12,
+        .end_col = 3,
+    };
+    const n = sel.normalized();
+    try std.testing.expect(n.contains(10, 5));
+    try std.testing.expect(n.contains(10, 40));
+    try std.testing.expect(!n.contains(10, 4));
+    try std.testing.expect(n.contains(11, 0));
+    try std.testing.expect(n.contains(11, 999));
+    try std.testing.expect(n.contains(12, 0));
+    try std.testing.expect(n.contains(12, 3));
+    try std.testing.expect(!n.contains(12, 4));
+}
+
+test "Selection.normalized reverses when end before start" {
+    const sel = Selection{
+        .pane = 0,
+        .start_row = 10,
+        .start_col = 5,
+        .end_row = 8,
+        .end_col = 3,
+    };
+    const n = sel.normalized();
+    try std.testing.expectEqual(@as(i64, 8), n.start_row);
+    try std.testing.expectEqual(@as(u16, 3), n.start_col);
+    try std.testing.expectEqual(@as(i64, 10), n.end_row);
+    try std.testing.expectEqual(@as(u16, 5), n.end_col);
 }

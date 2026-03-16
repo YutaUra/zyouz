@@ -264,7 +264,7 @@ pub fn runMultiPane(
     // Initial render — clear screen once to start with a clean slate.
     try terminal.writeAll("\x1b[2J");
     recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
-    try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*);
+    try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*, selection);
 
     while (true) {
         // Build pollfd array: [terminal, pane0_pty, pane1_pty, ..., signal_pipe]
@@ -419,7 +419,7 @@ pub fn runMultiPane(
         }
 
         if (needs_render) {
-            try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*);
+            try renderAll(allocator, terminal, renderer, panes, rects, active_pane.*, selection);
         }
     }
 }
@@ -932,6 +932,7 @@ fn renderAll(
     panes: []Pane,
     rects: []const Layout.Rect,
     active_pane: usize,
+    sel: ?Selection,
 ) !void {
     const Screen = @import("Screen.zig");
     // Build screen pointer and scroll offset arrays
@@ -940,6 +941,18 @@ fn renderAll(
     for (panes, 0..) |*pane, i| {
         screens[i] = &pane.screen;
         scroll_offsets[i] = pane.scroll_offset;
+    }
+
+    // Build selection ranges per pane
+    var pane_selections: [max_panes]?Renderer.SelectionRange = .{null} ** max_panes;
+    if (sel) |s| {
+        const n = s.normalized();
+        pane_selections[s.pane] = .{
+            .start_row = n.start_row,
+            .start_col = n.start_col,
+            .end_row = n.end_row,
+            .end_col = n.end_col,
+        };
     }
 
     // Dynamic buffer: typical frame is 50-200 KB for colorful content.
@@ -953,6 +966,7 @@ fn renderAll(
         rects,
         scroll_offsets[0..panes.len],
         active_pane,
+        pane_selections[0..panes.len],
     );
 
     // Render exit status overlays for exited panes

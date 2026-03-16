@@ -5,6 +5,23 @@ const Layout = @import("Layout.zig");
 
 const Renderer = @This();
 
+pub const SelectionRange = struct {
+    start_row: i64,
+    start_col: u16,
+    end_row: i64,
+    end_col: u16,
+
+    fn contains(self: SelectionRange, unified_row: i64, col: u16) bool {
+        if (unified_row < self.start_row or unified_row > self.end_row) return false;
+        if (self.start_row == self.end_row) {
+            return col >= self.start_col and col <= self.end_col;
+        }
+        if (unified_row == self.start_row) return col >= self.start_col;
+        if (unified_row == self.end_row) return col <= self.end_col;
+        return true;
+    }
+};
+
 const BorderDir = struct {
     horizontal: bool = false,
     vertical: bool = false,
@@ -243,12 +260,15 @@ pub fn isBorder(self: *const Renderer, row: u16, col: u16) bool {
     return dir.horizontal or dir.vertical;
 }
 
-pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect) !void {
+pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect, pane_selection: ?SelectionRange) !void {
     _ = self;
     var last_fg: Screen.Color = .default;
     var last_bg: Screen.Color = .default;
     var last_style: Screen.Style = .{};
     var last_hyperlink: u16 = 0;
+    var last_selected: bool = false;
+
+    const sb_count = screen.scrollbackLen();
 
     var row: u16 = 0;
     while (row < screen.height) : (row += 1) {
@@ -258,6 +278,8 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
             @as(u32, rect.col) + 1,
         });
 
+        const unified: i64 = @as(i64, @intCast(sb_count)) + @as(i64, row);
+
         var col: u16 = 0;
         while (col < screen.width) : (col += 1) {
             const cell = screen.cellAt(row, col);
@@ -266,15 +288,27 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
             // The wide character already consumed 2 terminal columns.
             if (cell.char == 0) continue;
 
+            const is_selected = if (pane_selection) |sel|
+                sel.contains(unified, col)
+            else
+                false;
+
+            var render_cell = cell.*;
+            if (is_selected) {
+                render_cell.fg = if (cell.bg == .default) Screen.Color{ .indexed = 0 } else cell.bg;
+                render_cell.bg = if (cell.fg == .default) Screen.Color{ .indexed = 7 } else cell.fg;
+            }
+
             // Emit SGR only when attributes change.
             // writeSgr emits \x1b[0m which may close OSC 8 in some
             // terminals, so reset last_hyperlink to force re-emission.
-            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
-                !std.meta.eql(cell.style, last_style))
+            if (!std.meta.eql(render_cell.fg, last_fg) or !std.meta.eql(render_cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style) or is_selected != last_selected)
             {
-                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+                try writeSgr(writer, &render_cell, &last_fg, &last_bg, &last_style);
                 last_hyperlink = 0;
             }
+            last_selected = is_selected;
 
             // Emit OSC 8 after SGR so the hyperlink is not closed by
             // the SGR reset (\x1b[0m).
@@ -291,7 +325,7 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
 
             // Write character as UTF-8
             var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
+            const len = std.unicode.utf8Encode(render_cell.char, &buf) catch 1;
             try writer.writeAll(buf[0..len]);
         }
     }
@@ -308,12 +342,13 @@ pub fn renderPane(self: *const Renderer, writer: anytype, screen: *const Screen,
 
 const empty_cell = Screen.Cell{};
 
-pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect, scroll_offset: usize) !void {
+pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *const Screen, rect: Layout.Rect, scroll_offset: usize, pane_selection: ?SelectionRange) !void {
     _ = self;
     var last_fg: Screen.Color = .default;
     var last_bg: Screen.Color = .default;
     var last_style: Screen.Style = .{};
     var last_hyperlink: u16 = 0;
+    var last_selected: bool = false;
 
     const sb_count = screen.scrollbackLen();
 
@@ -354,15 +389,27 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
             // Skip continuation cells (right half of wide characters).
             if (cell.char == 0) continue;
 
+            const is_selected = if (pane_selection) |sel|
+                sel.contains(unified, col)
+            else
+                false;
+
+            var render_cell = cell.*;
+            if (is_selected) {
+                render_cell.fg = if (cell.bg == .default) Screen.Color{ .indexed = 0 } else cell.bg;
+                render_cell.bg = if (cell.fg == .default) Screen.Color{ .indexed = 7 } else cell.fg;
+            }
+
             // Emit SGR only when attributes change.
             // writeSgr emits \x1b[0m which may close OSC 8 in some
             // terminals, so reset last_hyperlink to force re-emission.
-            if (!std.meta.eql(cell.fg, last_fg) or !std.meta.eql(cell.bg, last_bg) or
-                !std.meta.eql(cell.style, last_style))
+            if (!std.meta.eql(render_cell.fg, last_fg) or !std.meta.eql(render_cell.bg, last_bg) or
+                !std.meta.eql(cell.style, last_style) or is_selected != last_selected)
             {
-                try writeSgr(writer, cell, &last_fg, &last_bg, &last_style);
+                try writeSgr(writer, &render_cell, &last_fg, &last_bg, &last_style);
                 last_hyperlink = 0;
             }
+            last_selected = is_selected;
 
             // Emit OSC 8 after SGR so the hyperlink is not closed by
             // the SGR reset (\x1b[0m).
@@ -378,7 +425,7 @@ pub fn renderPaneWithOffset(self: *const Renderer, writer: anytype, screen: *con
             }
 
             var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cell.char, &buf) catch 1;
+            const len = std.unicode.utf8Encode(render_cell.char, &buf) catch 1;
             try writer.writeAll(buf[0..len]);
         }
     }
@@ -553,7 +600,7 @@ pub fn renderFrame(
 
     // Render all panes
     for (screens, rects) |screen, rect| {
-        try self.renderPane(writer, screen, rect);
+        try self.renderPane(writer, screen, rect, null);
     }
 
     // Render borders
@@ -584,12 +631,13 @@ pub fn renderFrameWithScrollback(
     rects: []const Layout.Rect,
     scroll_offsets: []const usize,
     active_pane: usize,
+    pane_selections: []const ?SelectionRange,
 ) !void {
     // Begin synchronized update — prevents flicker by buffering in the terminal.
     try writer.writeAll("\x1b[?2026h\x1b[?25l");
 
-    for (screens, rects, scroll_offsets) |screen, rect, offset| {
-        try self.renderPaneWithOffset(writer, screen, rect, offset);
+    for (screens, rects, scroll_offsets, pane_selections) |screen, rect, offset, sel| {
+        try self.renderPaneWithOffset(writer, screen, rect, offset, sel);
     }
 
     try self.renderBorders(writer);
@@ -829,7 +877,7 @@ test "render produces cursor-positioned output for pane content" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect, null);
     const output = buf.items;
 
     // Should contain cursor positioning to row 4 (1-based), col 6
@@ -851,7 +899,7 @@ test "render output includes SGR for colored cells" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect, null);
     const output = buf.items;
 
     // Should contain SGR for red foreground
@@ -907,11 +955,11 @@ test "renderPaneWithOffset offset=0 matches renderPane output" {
 
     var buf1: std.ArrayListUnmanaged(u8) = .empty;
     defer buf1.deinit(std.testing.allocator);
-    try renderer.renderPane(buf1.writer(std.testing.allocator), &screen, rect);
+    try renderer.renderPane(buf1.writer(std.testing.allocator), &screen, rect, null);
 
     var buf2: std.ArrayListUnmanaged(u8) = .empty;
     defer buf2.deinit(std.testing.allocator);
-    try renderer.renderPaneWithOffset(buf2.writer(std.testing.allocator), &screen, rect, 0);
+    try renderer.renderPaneWithOffset(buf2.writer(std.testing.allocator), &screen, rect, 0, null);
 
     try std.testing.expectEqualStrings(buf1.items, buf2.items);
 }
@@ -933,7 +981,7 @@ test "renderPaneWithOffset shows scrollback lines when offset > 0" {
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1, null);
     const output = buf.items;
 
     // With offset=1, row 0 should show scrollback line "AAA"
@@ -957,7 +1005,7 @@ test "scroll indicator shown when offset > 0" {
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 1, null);
     const output = buf.items;
 
     try std.testing.expect(std.mem.indexOf(u8, output, "[1/1]") != null);
@@ -978,7 +1026,7 @@ test "no scroll indicator when offset = 0" {
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0, null);
     const output = buf.items;
 
     // Scroll indicator format is "[N/M]" — should not appear at offset=0
@@ -1193,7 +1241,7 @@ test "renderPaneWithOffset emits OSC 8 for hyperlinked cells" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0);
+    try renderer.renderPaneWithOffset(buf.writer(std.testing.allocator), &screen, rect, 0, null);
     const output = buf.items;
 
     // Should contain OSC 8 open sequence with the URL
@@ -1223,7 +1271,7 @@ test "renderPane emits OSC 8 for hyperlinked cells" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect);
+    try renderer.renderPane(buf.writer(std.testing.allocator), &screen, rect, null);
     const output = buf.items;
 
     try std.testing.expect(std.mem.indexOf(u8, output, "\x1b]8;;https://example.com\x1b\\") != null);

@@ -29,6 +29,8 @@ utf8_expected: u3 = 0,
 /// Caller should forward these bytes back to the child PTY.
 response_buf: [64]u8 = undefined,
 response_len: u8 = 0,
+osc_buf: [2048]u8 = undefined,
+osc_len: u16 = 0,
 
 pub fn init(screen: *Screen) VtParser {
     return .{
@@ -132,6 +134,13 @@ fn processEscape(self: *VtParser, byte: u8) void {
             self.fullReset();
             self.state = .ground;
         },
+        '\\' => {
+            // ST (String Terminator) — dispatch buffered OSC if any
+            if (self.osc_len > 0) {
+                self.dispatchOsc();
+            }
+            self.state = .ground;
+        },
         else => self.state = .ground,
     }
 }
@@ -183,9 +192,17 @@ fn processCsiIntermediate(self: *VtParser, byte: u8) void {
 
 fn processOsc(self: *VtParser, byte: u8) void {
     switch (byte) {
-        0x07 => self.state = .ground, // BEL terminates OSC
-        0x1B => self.state = .escape, // ESC \ (ST) — escape state will handle
-        else => {}, // consume OSC payload
+        0x07 => {
+            self.dispatchOsc();
+            self.state = .ground;
+        },
+        0x1B => self.state = .escape,
+        else => {
+            if (self.osc_len < self.osc_buf.len) {
+                self.osc_buf[self.osc_len] = byte;
+                self.osc_len += 1;
+            }
+        },
     }
 }
 
@@ -463,6 +480,30 @@ fn resetParams(self: *VtParser) void {
     self.params = [_]u16{0} ** max_params;
     self.param_count = 0;
     self.csi_prefix = 0;
+    self.osc_len = 0;
+}
+
+fn dispatchOsc(self: *VtParser) void {
+    const payload = self.osc_buf[0..self.osc_len];
+    self.osc_len = 0;
+
+    // Check for "8;" prefix (OSC 8)
+    if (payload.len >= 2 and payload[0] == '8' and payload[1] == ';') {
+        self.handleOsc8(payload[2..]);
+        return;
+    }
+}
+
+fn handleOsc8(self: *VtParser, data: []const u8) void {
+    // Format: params;url
+    const sep = std.mem.indexOfScalar(u8, data, ';') orelse return;
+    const url = data[sep + 1 ..];
+
+    if (url.len == 0) {
+        self.screen.current_hyperlink = 0;
+    } else {
+        self.screen.current_hyperlink = self.screen.internHyperlink(url) catch 0;
+    }
 }
 
 test "printable ASCII writes to screen" {
@@ -937,6 +978,45 @@ test "CSI with < prefix is silently consumed (Kitty keyboard pop)" {
 
     try std.testing.expectEqual(@as(u21, 'B'), screen.cellAt(0, 0).char);
     try std.testing.expectEqual(@as(u16, 1), screen.cursor_col);
+}
+
+test "OSC 8 hyperlink sets current hyperlink on screen" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    // ESC ] 8 ; ; https://example.com ESC \ A ESC ] 8 ; ; ESC \ B
+    parser.feed("\x1b]8;;https://example.com\x1b\\");
+    parser.feed("A");
+    parser.feed("\x1b]8;;\x1b\\");
+    parser.feed("B");
+
+    const cell_a = screen.cellAt(0, 0);
+    try std.testing.expect(cell_a.hyperlink > 0);
+    try std.testing.expectEqualStrings(
+        "https://example.com",
+        screen.hyperlinkUrl(cell_a.hyperlink).?,
+    );
+
+    const cell_b = screen.cellAt(0, 1);
+    try std.testing.expectEqual(@as(u16, 0), cell_b.hyperlink);
+}
+
+test "OSC 8 hyperlink with BEL terminator" {
+    var screen = try Screen.init(std.testing.allocator, 80, 24);
+    defer screen.deinit();
+    var parser = VtParser.init(&screen);
+
+    parser.feed("\x1b]8;;https://zig.dev\x07");
+    parser.feed("Z");
+    parser.feed("\x1b]8;;\x07");
+
+    const cell = screen.cellAt(0, 0);
+    try std.testing.expect(cell.hyperlink > 0);
+    try std.testing.expectEqualStrings(
+        "https://zig.dev",
+        screen.hyperlinkUrl(cell.hyperlink).?,
+    );
 }
 
 test "Kitty keyboard push + pop produces no visible output" {

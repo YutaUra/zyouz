@@ -257,6 +257,8 @@ pub fn runMultiPane(
     var handler = input.InputHandler.initWithPrefix(prefix_key);
     var mouse_parser = MouseParser{};
     var drag_state: ?DragState = null;
+    var selection_anchor: ?SelectionAnchor = null;
+    var selection: ?Selection = null;
     var buf: [4096]u8 = undefined;
 
     // Initial render — clear screen once to start with a clean slate.
@@ -370,7 +372,7 @@ pub fn runMultiPane(
                         },
                         .consumed => {},
                         .event => |ev| {
-                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &needs_render, pane_gap, terminal, &cursor_shape);
+                            handleMouseEvent(ev, panes, rects, active_pane, renderer, &handler, &drag_state, &selection_anchor, &selection, &needs_render, pane_gap, terminal, &cursor_shape);
                         },
                         .escape_passthrough => |b| {
                             processKeyByte(0x1B, &handler, panes, rects, active_pane, renderer, &needs_render) catch |err| switch (err) {
@@ -523,6 +525,14 @@ fn findBorderNear(rects: []const Layout.Rect, row: u16, col: u16) ?Layout.Border
     return null;
 }
 
+fn unifiedRowFromMouse(panes: []const Pane, rects: []const Layout.Rect, pane_idx: usize, ev_row: u16) i64 {
+    const screen = &panes[pane_idx].screen;
+    const local_row: i64 = @as(i64, ev_row) - @as(i64, rects[pane_idx].row);
+    const sb_count: i64 = @intCast(screen.scrollbackLen());
+    const scroll_offset: i64 = @intCast(panes[pane_idx].scroll_offset);
+    return sb_count - scroll_offset + local_row;
+}
+
 fn handleMouseEvent(
     ev: MouseParser.MouseEvent,
     panes: []Pane,
@@ -531,6 +541,8 @@ fn handleMouseEvent(
     renderer: *Renderer,
     handler: *const input.InputHandler,
     drag_state: *?DragState,
+    selection_anchor: *?SelectionAnchor,
+    selection: *?Selection,
     needs_render: *bool,
     pane_gap: u16,
     terminal: *const Terminal.Terminal,
@@ -616,7 +628,7 @@ fn handleMouseEvent(
                     setCursorShape(terminal, shape, cursor_shape);
                     return;
                 }
-                // Click on pane to focus (or open hyperlink on active pane)
+                // Record selection anchor for potential drag selection
                 if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
                     if (panes[target_pane].mouse_mode == .passthrough) {
                         var sgr_buf: [32]u8 = undefined;
@@ -624,17 +636,14 @@ fn handleMouseEvent(
                         if (sgr.len > 0) {
                             _ = panes[target_pane].pty.writeInput(sgr) catch {};
                         }
-                    } else if (target_pane == active_pane.*) {
-                        // Non-passthrough active pane: open hyperlink if present.
-                        // Regular click on the active pane has no other purpose
-                        // (it's already focused), so use it for link opening.
-                        const local_row = ev.row -| rects[target_pane].row;
+                    } else {
                         const local_col = ev.col -| rects[target_pane].col;
-                        const cell = panes[target_pane].screen.cellAt(local_row, local_col);
-                        if (panes[target_pane].screen.hyperlinkUrl(cell.hyperlink)) |url| {
-                            openUrl(url);
-                            return;
-                        }
+                        selection_anchor.* = .{
+                            .pane = target_pane,
+                            .unified_row = unifiedRowFromMouse(panes, rects, target_pane, ev.row),
+                            .col = local_col,
+                        };
+                        selection.* = null;
                     }
                     if (target_pane != active_pane.*) {
                         active_pane.* = target_pane;
@@ -662,6 +671,32 @@ fn handleMouseEvent(
                         setCursorShape(terminal, shape, cursor_shape);
                     }
                     applyDrag(ds, ev, panes, rects, renderer, active_pane, handler, needs_render, pane_gap);
+                } else if (selection_anchor.*) |anchor| {
+                    // Text selection drag
+                    if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
+                        if (target_pane == anchor.pane) {
+                            const local_col = ev.col -| rects[target_pane].col;
+                            const unified = unifiedRowFromMouse(panes, rects, target_pane, ev.row);
+                            selection.* = .{
+                                .pane = anchor.pane,
+                                .start_row = anchor.unified_row,
+                                .start_col = anchor.col,
+                                .end_row = unified,
+                                .end_col = local_col,
+                            };
+                            needs_render.* = true;
+
+                            // Auto-scroll when dragging past pane edges
+                            const rect = rects[target_pane];
+                            if (ev.row <= rect.row and panes[target_pane].scroll_offset < panes[target_pane].screen.scrollbackLen()) {
+                                panes[target_pane].scrollViewUp(1);
+                                selection.*.?.end_row -= 1;
+                            } else if (ev.row >= rect.row + rect.height -| 1 and panes[target_pane].scroll_offset > 0) {
+                                panes[target_pane].scrollViewDown(1);
+                                selection.*.?.end_row += 1;
+                            }
+                        }
+                    }
                 } else {
                     // Drag on a passthrough pane → forward
                     if (Layout.paneAt(rects, ev.row, ev.col)) |target_pane| {
@@ -677,6 +712,27 @@ fn handleMouseEvent(
             }
         },
         .release => {
+            if (selection.*) |_| {
+                // Selection complete — copy will be added in Task 4
+                selection.* = null;
+                selection_anchor.* = null;
+                needs_render.* = true;
+            } else if (selection_anchor.*) |anchor| {
+                // Click without drag — handle hyperlink open or focus
+                selection_anchor.* = null;
+                if (panes[anchor.pane].mouse_mode != .passthrough and anchor.pane == active_pane.*) {
+                    const local_row = ev.row -| rects[anchor.pane].row;
+                    const local_col = ev.col -| rects[anchor.pane].col;
+                    const cell = panes[anchor.pane].screen.cellAt(local_row, local_col);
+                    if (panes[anchor.pane].screen.hyperlinkUrl(cell.hyperlink)) |url| {
+                        openUrl(url);
+                    }
+                } else if (anchor.pane != active_pane.*) {
+                    active_pane.* = anchor.pane;
+                    recomputeBorders(renderer, panes, rects, active_pane.*, handler.state == .command);
+                    needs_render.* = true;
+                }
+            }
             drag_state.* = null;
             setCursorShape(terminal, .default, cursor_shape);
             // Forward release to passthrough panes

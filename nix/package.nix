@@ -8,13 +8,13 @@
 
 stdenv.mkDerivation {
   pname = "zyouz";
-  version = "0.2.0";
+  version = "0.3.0";
 
   src = fetchFromGitHub {
     owner = "YutaUra";
     repo = "zyouz";
     rev = "v${version}";
-    hash = "sha256-m8KTillhvWqIAACKL9k8iYVLyp9iXu5pl/AaCFvfuu8=";
+    hash = "";
   };
 
   nativeBuildInputs = [ zig.hook ];

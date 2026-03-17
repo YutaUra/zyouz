@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-03-17
+
+### Added
+
+- **OSC 8 hyperlink support**: terminal programs (ls, cargo, gcc, etc.) can output clickable links that are preserved through zyouz's rendering pipeline
+- **Click-to-open hyperlinks**: click on a hyperlinked cell in an active non-passthrough pane to open the URL, or Ctrl+click from any pane
+- **Text selection**: click and drag to select text in non-passthrough panes with inverse video highlighting
+- **Clipboard copy via OSC 52**: selected text is automatically copied to the system clipboard on mouse release
+- **Auto-scroll during selection**: dragging past pane edges scrolls through scrollback history
+- **Mouse modifier parsing**: Shift/Meta/Ctrl modifier bits from SGR mouse events are now correctly parsed
+
+### Fixed
+
+- **OSC 8 rendering order**: emit OSC 8 sequences after SGR reset to prevent hyperlinks from being closed by `\x1b[0m`
+
 ## [0.2.0] - 2026-03-14
 
 ### Added

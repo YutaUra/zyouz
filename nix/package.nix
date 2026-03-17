@@ -14,7 +14,7 @@ stdenv.mkDerivation {
     owner = "YutaUra";
     repo = "zyouz";
     rev = "v${version}";
-    hash = "";
+    hash = "sha256-VURZD3416vxtPDohvv6PPsLaReckil0TrSOJiCoUvtI=";
   };
 
   nativeBuildInputs = [ zig.hook ];

@@ -417,6 +417,25 @@ pub fn hyperlinkUrl(self: *const Screen, idx: u16) ?[]const u8 {
     return self.hyperlink_urls.items[i];
 }
 
+/// Extract text from a single row, columns start_col to end_col inclusive.
+/// Returns the slice of buf that was written.
+pub fn extractLineText(self: *const Screen, row: u16, start_col: u16, end_col: u16, buf: []u8) []const u8 {
+    var pos: usize = 0;
+    var col = start_col;
+    while (col <= end_col and col < self.width) : (col += 1) {
+        const cell = self.cellAt(row, col);
+        if (cell.char == 0) continue; // skip wide char continuation
+        var utf8_buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cell.char, &utf8_buf) catch continue;
+        if (pos + len > buf.len) break;
+        @memcpy(buf[pos..][0..len], utf8_buf[0..len]);
+        pos += len;
+    }
+    // Trim trailing spaces
+    while (pos > 0 and buf[pos - 1] == ' ') pos -= 1;
+    return buf[0..pos];
+}
+
 fn clearRow(self: *Screen, row: u16) void {
     const start: usize = @as(usize, row) * @as(usize, self.width);
     const end: usize = start + @as(usize, self.width);
@@ -883,6 +902,19 @@ test "resetAttributes clears current hyperlink" {
     screen.resetAttributes();
 
     try std.testing.expectEqual(@as(u16, 0), screen.current_hyperlink);
+}
+
+test "extractLineText returns cell characters as UTF-8" {
+    var screen = try Screen.init(std.testing.allocator, 10, 3);
+    defer screen.deinit();
+
+    screen.writeChar('H');
+    screen.writeChar('i');
+    screen.writeChar('!');
+
+    var buf: [64]u8 = undefined;
+    const text = screen.extractLineText(0, 0, 2, &buf);
+    try std.testing.expectEqualStrings("Hi!", text);
 }
 
 test "carriageReturn clears wrap_pending" {

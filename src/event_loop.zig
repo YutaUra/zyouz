@@ -533,6 +533,72 @@ fn unifiedRowFromMouse(panes: []const Pane, rects: []const Layout.Rect, pane_idx
     return sb_count - scroll_offset + local_row;
 }
 
+fn copySelectionToClipboard(terminal: *const Terminal.Terminal, panes: []const Pane, sel: Selection) void {
+    const Screen = @import("Screen.zig");
+    const n = sel.normalized();
+    const screen: *const Screen = &panes[n.pane].screen;
+    const sb_count: i64 = @intCast(screen.scrollbackLen());
+
+    // Build selected text into a buffer
+    var text_buf: [16384]u8 = undefined;
+    var text_pos: usize = 0;
+
+    var row = n.start_row;
+    while (row <= n.end_row) : (row += 1) {
+        const start_c: u16 = if (row == n.start_row) n.start_col else 0;
+        const end_c: u16 = if (row == n.end_row) n.end_col else screen.width -| 1;
+
+        var line_buf: [1024]u8 = undefined;
+        const line_text = if (row < sb_count) blk: {
+            // Scrollback line
+            const sb_idx: usize = @intCast(row);
+            if (screen.scrollbackLine(sb_idx)) |line| {
+                var lpos: usize = 0;
+                var c = start_c;
+                while (c <= end_c) : (c += 1) {
+                    if (c >= line.len) break;
+                    const cell = &line[c];
+                    if (cell.char == 0) continue;
+                    var utf8: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cell.char, &utf8) catch continue;
+                    if (lpos + len > line_buf.len) break;
+                    @memcpy(line_buf[lpos..][0..len], utf8[0..len]);
+                    lpos += len;
+                }
+                while (lpos > 0 and line_buf[lpos - 1] == ' ') lpos -= 1;
+                break :blk line_buf[0..lpos];
+            }
+            break :blk @as([]const u8, "");
+        } else blk: {
+            // Live screen line
+            const screen_row: u16 = @intCast(row - sb_count);
+            break :blk screen.extractLineText(screen_row, start_c, end_c, &line_buf);
+        };
+
+        if (text_pos + line_text.len + 1 > text_buf.len) break;
+        @memcpy(text_buf[text_pos..][0..line_text.len], line_text);
+        text_pos += line_text.len;
+        if (row < n.end_row) {
+            text_buf[text_pos] = '\n';
+            text_pos += 1;
+        }
+    }
+
+    if (text_pos == 0) return;
+
+    // Base64 encode and send via OSC 52
+    const text = text_buf[0..text_pos];
+    var b64_buf: [24000]u8 = undefined;
+    const b64_len = std.base64.standard.Encoder.calcSize(text.len);
+    if (b64_len > b64_buf.len) return;
+    const b64 = std.base64.standard.Encoder.encode(b64_buf[0..b64_len], text);
+
+    // OSC 52: \x1b]52;c;<base64>\x07
+    terminal.writeAll("\x1b]52;c;") catch return;
+    terminal.writeAll(b64) catch return;
+    terminal.writeAll("\x07") catch return;
+}
+
 fn handleMouseEvent(
     ev: MouseParser.MouseEvent,
     panes: []Pane,
@@ -712,8 +778,8 @@ fn handleMouseEvent(
             }
         },
         .release => {
-            if (selection.*) |_| {
-                // Selection complete — copy will be added in Task 4
+            if (selection.*) |sel| {
+                copySelectionToClipboard(terminal, panes, sel);
                 selection.* = null;
                 selection_anchor.* = null;
                 needs_render.* = true;
